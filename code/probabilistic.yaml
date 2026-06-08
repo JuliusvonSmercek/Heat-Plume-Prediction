@@ -1,34 +1,34 @@
 run_configuration:
-  run_name: steady-state
+  run_name: paper-results-probabilistic
   dataset: dataset_giant_100hp_varyK
   seed: 2406
-  device: cuda:0
+  device: cuda:1
   use_velocity_model: false
 
   pipeline:
     - clean: data_prep
     - clean: results-step1
     - clean: results-step2
-    - step1: train
-    - step2: run
     - clean: results-step3
+    - step2: run
     - step3: train
 
 general_configuration:
   step1:
     datapoints:
-      validation: [0]
-      test: [1]
+      validation: 0
+      test: 1
       train: [2]
     general:
-      epochs: 100
+      epochs: 20
       visualize: true
+      model_path: velocity_model
     scheduler:
       type: ReduceLROnPlateau
-      init_lr: 1e-4
+      init_lr: 0.01
       mode: min
       factor: 0.2
-      patience: 10
+      patience: 30
       threshold: 1e-3
       min_lr: 1e-6
     model_parameters:
@@ -49,6 +49,7 @@ general_configuration:
       bool_cutouts: true
       optimizer_switch: false
       optimizer: Adam
+      lr: 0.0001
       activation: ReLU
 
   step2:
@@ -58,7 +59,7 @@ general_configuration:
       diffusion_scale: 0.05
       diffusion_base: 1.8
     directsolver:
-      samples: 150000
+      samples: 75000
       steps: 5000
     physical_parameters:
       resolution_m: 5.0
@@ -74,7 +75,6 @@ general_configuration:
       longitudinal_dispersivity_m: 1.0
       transverse_dispersivity_h_m: 0.1
       ambient_temperature_C: 10.6
-      temperature_spread_C: 5.0
       injection_temperature_C:
         time_unit: year
         values:
@@ -88,39 +88,41 @@ general_configuration:
 
   step3:
     datapoints:
-      train: [0]
-      validation: [1]
-      test: [2]
+      validation: 0
+      test: 1
+      train: [2]
     general:
       epochs: 300
       visualize: true
+      model_path: temperature_model
     scheduler:
       type: ReduceLROnPlateau
-      init_lr: 1e-3
+      init_lr: 0.01
       mode: min
       factor: 0.2
-      patience: 10
+      patience: 30
       threshold: 1e-3
       min_lr: 1e-6
     model_parameters:
       network: unet
-      inputs: [p, k, i, x, y, 1, 2, 3, 5, 7]
+      inputs: [p, k, i, x, y, 1, 2, 3, 7]
       outputs: [t]
       batchsize: 20
-      kernel_size: 3
-      depth: 3
-      init_features: 64
+      kernel_size: 5
+      depth: 5
+      init_features: 128
       stride: 1
       dilation: 1
-      norm: batchnorm # instancenorm, groupnorm
+      norm: batchnorm
       repeat_inner: false
       skip_per_dir: 8
-      len_box: 256
-      train_loss: Huber
+      len_box: 400
+      train_loss: MAE
       bool_cutouts: true
       optimizer_switch: false
-      optimizer: AdamW
-      activation: LeakyReLU
+      optimizer: Adam
+      lr: 0.001
+      activation: ReLU
 
 paths:
   datasets_raw: ../datasets

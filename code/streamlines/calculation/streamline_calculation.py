@@ -1,19 +1,16 @@
-from code.streamlines.calculation.streamline_direct_solver import direct_solve
-from code.streamlines.calculation.streamline_tensors import make_streamlines_gpu
-from code.utils import logging as log  # noqa: F401
-from code.utils.yaml_parser import SimulationStepConfig
-from typing import Any
-
 import torch
-
+from typing import Any, Dict, Tuple
+from utils.yaml_parser import SimulationStepConfig
+from streamlines.calculation.streamline_tensors import make_streamlines_gpu
+from streamlines.calculation.streamline_direct_solver import direct_solve
 
 def compute_physics_streamlines(
     step2_config: SimulationStepConfig,
     heat_pump_pos: torch.Tensor,
     vx_m_per_year: torch.Tensor,
     vy_m_per_year: torch.Tensor,
-    dims: Any,
-) -> dict[str, torch.Tensor]:
+    dims: Any
+) -> Dict[str, torch.Tensor]:
     """Compute GPU streamlines and direct solver physics, returning keyed tensor results."""
 
     (
@@ -22,14 +19,14 @@ def compute_physics_streamlines(
         stream_faded_pos,
         stream_max_faded,
         stream_max_seasons,
-        stream_sum_seasons_pos,
+        stream_sum_seasons_pos
     ) = make_streamlines_gpu(
         step2_config.streamlines,
         step2_config.physical_parameters,
         heat_pump_pos.clone(),
         vx_m_per_year,
         vy_m_per_year,
-        dims,
+        dims
     )
 
     streamline_direct_solver: torch.Tensor = direct_solve(
@@ -38,7 +35,7 @@ def compute_physics_streamlines(
         heat_pump_pos.clone(),
         vx_m_per_year,
         vy_m_per_year,
-        dims,
+        dims
     )
 
     # Dictionary keys map to config property names
@@ -49,5 +46,5 @@ def compute_physics_streamlines(
         "4": stream_max_faded,
         "5": stream_sum_seasons_pos,
         "6": stream_max_seasons,
-        "7": streamline_direct_solver,
+        "7": streamline_direct_solver
     }

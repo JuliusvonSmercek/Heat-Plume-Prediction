@@ -1,55 +1,57 @@
-import json
+import sys
 import os
 import shutil
-import sys
-from code.utils import logging as log  # noqa: F401
-from typing import Any
-
-import h5py
+import json
 import yaml
+import h5py
+from typing import Dict, Any, List, Optional
 
-
-def build_settings_dict(data: dict[str, Any]) -> dict[str, Any]:
+def build_settings_dict(data: Dict[str, Any]) -> Dict[str, Any]:
     """Extracts and transforms JSON data into the target YAML structure."""
-    gen = data.get("general", {})
+    gen = data.get('general', {})
 
     # Grid calculations
-    ncells = gen.get("number_cells", [0, 0, 0])
-    res = gen.get("cell_resolution", 5.0)
-
+    ncells = gen.get('number_cells', [0, 0, 0])
+    res = gen.get('cell_resolution', 5.0)
+    
     return {
-        "general": {"dimensions": 2, "random_bool": False, "seed_id": gen.get("random_seed", 0)},
-        "grid": {"ncells": ncells, "size": [n * res for n in ncells]},
+        'general': {
+            'dimensions': 2,
+            'random_bool': False,
+            'seed_id': gen.get('random_seed', 0)
+        },
+        'grid': {
+            'ncells': ncells,
+            'size': [n * res for n in ncells]
+        }
     }
-
 
 def convert_state_to_yaml(input_dir: str, output_dir: str) -> None:
     """Reads state JSON, transforms it, and writes config YAML."""
 
     # copy all json/yaml files from input_dir to output_dir except
     for file_name in os.listdir(input_dir):
-        if file_name == "state.json":
-            json_path = os.path.join(input_dir, "state.json")
-            yaml_path = os.path.join(output_dir, "inputs", "settings.yaml")
+      if file_name == "state.json":
+          json_path = os.path.join(input_dir, "state.json")
+          yaml_path = os.path.join(output_dir, "inputs", "settings.yaml")
 
-            try:
-                with open(json_path) as f:
-                    data = json.load(f)
-
-                yaml_content = build_settings_dict(data)
-
-                os.makedirs(os.path.dirname(yaml_path), exist_ok=True)
-                with open(yaml_path, "w") as f:
-                    yaml.dump(yaml_content, f, default_flow_style=False, sort_keys=False)
-
-            except (OSError, json.JSONDecodeError) as e:
-                log.info(f"Error processing configuration files: {e}", file=sys.stderr)
-        elif file_name.endswith(".json") or file_name.endswith(".yaml"):
-            src_file = os.path.join(input_dir, file_name)
-            dest_file = os.path.join(output_dir, file_name)
-            os.makedirs(os.path.dirname(dest_file), exist_ok=True)
-            shutil.copy(src_file, dest_file)
-
+          try:
+              with open(json_path, 'r') as f:
+                  data = json.load(f)
+              
+              yaml_content = build_settings_dict(data)
+              
+              os.makedirs(os.path.dirname(yaml_path), exist_ok=True)
+              with open(yaml_path, 'w') as f:
+                  yaml.dump(yaml_content, f, default_flow_style=False, sort_keys=False)
+                  
+          except (json.JSONDecodeError, IOError) as e:
+              print(f"Error processing configuration files: {e}", file=sys.stderr)
+      elif file_name.endswith(".json") or file_name.endswith(".yaml"):
+          src_file = os.path.join(input_dir, file_name)
+          dest_file = os.path.join(output_dir, file_name)
+          os.makedirs(os.path.dirname(dest_file), exist_ok=True)
+          shutil.copy(src_file, dest_file)
 
 def setup_pflotran_inputs(src_path: str, dest_path: str) -> None:
     """Copies required PFlotran input files (.ex and .uge) to the output directory."""
@@ -57,22 +59,21 @@ def setup_pflotran_inputs(src_path: str, dest_path: str) -> None:
     os.makedirs(target_dir, exist_ok=True)
 
     files_to_copy = [f"{d}.ex" for d in ["east", "north", "south", "west"]] + ["mesh.uge"]
-
+    
     for filename in files_to_copy:
         src_file = os.path.join(src_path, filename)
         if os.path.exists(src_file):
             shutil.copy(src_file, target_dir)
         else:
-            log.info(f"Warning: Source file {filename} not found in {src_path}", file=sys.stderr)
+            print(f"Warning: Source file {filename} not found in {src_path}", file=sys.stderr)
 
-
-def update_h5_keys(file_path: str, rename_map: dict[str, str]) -> None:
+def update_h5_keys(file_path: str, rename_map: Dict[str, str]) -> None:
     """Renames datasets/groups in an HDF5 file recursively handling nested keys."""
     if not os.path.exists(file_path):
         return
 
     with h5py.File(file_path, "r+") as f:
-        all_paths: list[str] = []
+        all_paths: List[str] = []
         f.visit(all_paths.append)
         # Sort by length descending to rename children before parents
         all_paths.sort(key=lambda x: -len(x))
@@ -92,7 +93,6 @@ def update_h5_keys(file_path: str, rename_map: dict[str, str]) -> None:
                     # Fallback for complex object moves
                     f.copy(old_path, new_path)
                     del f[old_path]
-
 
 def process_run_data(src_path: str, dest_path: str) -> None:
     """Copies and transforms run-specific output files and HDF5 data."""
@@ -126,19 +126,21 @@ def process_run_data(src_path: str, dest_path: str) -> None:
             if os.path.exists(perm_src):
                 shutil.copy(perm_src, os.path.join(run_dest, "interim_permeability_field.h5"))
 
-
 if __name__ == "__main__":
     if len(sys.argv) != 3:
-        log.info("Usage: python script.py <input_path> <output_path>")
+        print("Usage: python script.py <input_path> <output_path>")
         sys.exit(1)
 
     input_dir, output_dir = sys.argv[1], sys.argv[2]
-
-    log.info(f"Processing data from {input_dir} to {output_dir}...")
-
-    convert_state_to_yaml(input_dir, output_dir)
-
+    
+    print(f"Processing data from {input_dir} to {output_dir}...")
+    
+    convert_state_to_yaml(
+        input_dir,
+        output_dir
+    )
+    
     setup_pflotran_inputs(input_dir, output_dir)
     process_run_data(input_dir, output_dir)
-
-    log.info("Workflow completed successfully.")
+    
+    print("Workflow completed successfully.")
