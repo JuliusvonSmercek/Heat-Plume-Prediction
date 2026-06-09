@@ -34,7 +34,7 @@ def check_model_avail(args: dict):
     if not (model_dir / "model.pt").exists():
         raise FileNotFoundError(f"model.pt not found in {model_dir}")
     print(list(model_dir.iterdir()))
-    if not (model_dir / "../" / "config.yaml").exists():
+    if not (model_dir / "config.yaml").exists():
         raise FileNotFoundError(f"config.yaml not found in {model_dir}")
 
 def load_yaml(path: Path, **kwargs) -> dict:
