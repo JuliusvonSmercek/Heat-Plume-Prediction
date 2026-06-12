@@ -54,6 +54,9 @@ def process_single_datapoint(
     inputs: torch.Tensor = torch.load(destination_path / "Inputs" / run_id)
     norm_before.reverse(inputs, "Inputs")
 
+    if len(inputs.shape) == 4:
+      inputs = inputs.squeeze(1)
+
     # 2. Geometry Prep
     inputs_merged = crop_and_merge_tensors(
         expand_input_dimensions(inputs, step2_map, step3_map),
@@ -169,10 +172,13 @@ def execute_streamline_pipeline(config: AppConfig, mode: str) -> None:
     step2_in, step2_out = step1_in + step1_out, ["t"]
     step3_in, step3_out = gen_conf.step3.model_parameters.inputs, gen_conf.step3.model_parameters.outputs
 
-    # Preprocessing
-    network = gen_conf.step3.model_parameters.network
-    step1_dir = _run_preprocessing(network, step1_in, step1_out, prep_path, dataset_path, results_path)
-    step2_dir = _run_preprocessing(network, step2_in, step2_out, prep_path, dataset_path, results_path)
+    # Preprocessing — step1 uses UNet (single timestep); step2 needs sequence labels for step3 RNN
+    step1_dir = _run_preprocessing(
+        gen_conf.step1.model_parameters.network, step1_in, step1_out, prep_path, dataset_path, results_path
+    )
+    step2_dir = _run_preprocessing(
+        gen_conf.step3.model_parameters.network, step2_in, step2_out, prep_path, dataset_path, results_path
+    )
 
     # Initialization
     device = torch.device(run_conf.device)

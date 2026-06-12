@@ -16,6 +16,7 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 matplotlib.use("Agg")
 
+SEQUENTIAL_DATASET_NAMES = ["SimulationDatasetCutsSequential", "DataPointSequence", "Subset"]
 
 FONT_SIZES = {
     "title": 13,
@@ -47,6 +48,11 @@ class DataToVisualize:
     ambient_temp = 10.6
 
     def __post_init__(self):
+        if isinstance(self.data, torch.Tensor):
+            self.data = self.data.detach().cpu().numpy()
+        if not isinstance(self.extent_highs, tuple):
+            self.extent_highs = tuple(float(v) for v in self.extent_highs)
+
         extent = (0, int(self.extent_highs[0]), int(self.extent_highs[1]), 0)
 
         match self.physical_property:
@@ -58,6 +64,8 @@ class DataToVisualize:
                 | "Permeability X [m^2]"
                 | "Pressure Gradient [-]"
                 | "SDF"
+                | "Absolute Times"
+                | "Gap times"
             ):
                 cmap = "jp_linear_dark" if self.dark_mode else "jp_linear"
             case (
@@ -76,32 +84,36 @@ class DataToVisualize:
                 cmap = "binary"
                 self.vmin = 0
                 self.vmax = 1
-            case "Line Integral Convolution":
+            case "Line Integral Convolution" | "LIC":
                 cmap = "bone"
             case "Temperature [C]" | "Streamline-TemperatureApproximation" | "Streamline-Sum_TimeSeasons-Position":
-                match self.datasetType:
-                    case DatasetType.seasonal:
-                        cmap = "jp_temperature_bidirectional"
-                        self.vmin = self.ambient_temp - self.temperature_spread
-                        self.vmax = self.ambient_temp + self.temperature_spread
-                    case DatasetType.steady_state_heating:
-                        cmap = "jp_temperature_upperlinear"
-                        self.vmin = self.ambient_temp
-                        self.vmax = self.ambient_temp + self.temperature_spread
-                    case DatasetType.steady_state_cooling:
-                        cmap = "jp_temperature_lowerlinear"
-                        self.vmin = self.ambient_temp - self.temperature_spread
-                        self.vmax = self.ambient_temp
-                    case _:
-                        raise ValueError(f"Unknown dataset type: {self.datasetType}")
-                if self.dark_mode:
-                    cmap += "_dark"
-                if self.physical_property in [
+                if self.category == "Absolute Error":
+                    cmap = "jp_linear_dark" if self.dark_mode else "jp_linear"
+                elif self.physical_property in [
                     "Streamline-TemperatureApproximation",
                     "Streamline-Sum_TimeSeasons-Position",
                 ]:
+                    cmap = "jp_linear_dark" if self.dark_mode else "jp_linear"
                     self.vmin = 0
                     self.vmax = 1
+                else:
+                    match self.datasetType:
+                        case DatasetType.seasonal:
+                            cmap = "jp_temperature_bidirectional"
+                            self.vmin = self.ambient_temp - self.temperature_spread
+                            self.vmax = self.ambient_temp + self.temperature_spread
+                        case DatasetType.steady_state_heating:
+                            cmap = "jp_temperature_upperlinear"
+                            self.vmin = self.ambient_temp
+                            self.vmax = self.ambient_temp + self.temperature_spread
+                        case DatasetType.steady_state_cooling:
+                            cmap = "jp_temperature_lowerlinear"
+                            self.vmin = self.ambient_temp - self.temperature_spread
+                            self.vmax = self.ambient_temp
+                        case _:
+                            raise ValueError(f"Unknown dataset type: {self.datasetType}")
+                    if self.dark_mode:
+                        cmap += "_dark"
             case _:
                 raise ValueError(f"Unknown physical property: {self.physical_property}")
 
@@ -132,8 +144,29 @@ class DataToVisualize:
             self.physical_property = mapping[self.physical_property]
 
 
-# TODO: merge together
-def aligned_colorbar_old(
+def _unpack_batch(batch):
+    if len(batch) == 3:
+        return batch[0], batch[1], batch[2]
+    return batch[0], batch[1], None
+
+
+def _get_dataset_context(dataloader):
+    try:
+        norm = dataloader.dataset.norm
+        info = dataloader.dataset.info
+        dataset = dataloader.dataset
+    except AttributeError:
+        norm = dataloader.dataset.dataset.norm
+        info = dataloader.dataset.dataset.info
+        dataset = dataloader.dataset.dataset
+    return norm, info, dataset
+
+
+def _is_sequential_dataset(dataset) -> bool:
+    return dataset.__class__.__name__ in SEQUENTIAL_DATASET_NAMES
+
+
+def aligned_colorbar(
     ax,
     im,
     colorbar_label_size: int = FONT_SIZES["colorbar_label"],
@@ -144,20 +177,12 @@ def aligned_colorbar_old(
     cax = divider.append_axes("right", size=0.3, pad=0.05)
     cbar = ax.figure.colorbar(im, cax=cax, **kwargs)
     cbar.ax.tick_params(labelsize=colorbar_tick_size)
-    if getattr(cbar, "ax", None) is not None and cbar.ax.get_ylabel():
-        cbar.set_label(cbar.ax.get_ylabel(), fontsize=colorbar_label_size)
+    if kwargs.get("label"):
+        cbar.set_label(kwargs["label"], fontsize=colorbar_label_size)
     return cbar
 
 
-def aligned_colorbar(ax, im, **kwargs):
-    divider = make_axes_locatable(ax)
-    cax = divider.append_axes("right", size=0.3, pad=0.05)
-    cb = ax.figure.colorbar(im, cax=cax, **kwargs)
-    cb.ax.tick_params(labelsize=20)
-
-
-# TODO: merge together
-def plot_datapoint_old(
+def plot_datapoint(
     name: str,
     datapoint: DataToVisualize,
     name_pic: str,
@@ -170,36 +195,33 @@ def plot_datapoint_old(
 
     if remove_axis and is_streamline:
         fig = Figure(figsize=(6, 5))
-        # Use a copy to avoid side effects on the settings dict
         settings = settings_pic.copy()
         settings["dpi"] = 2560 / 5
         settings["bbox_inches"] = "tight"
         settings["pad_inches"] = 0
-
         ax = fig.add_axes([0, 0, 1, 1])
         ax.axis("off")
     else:
         fig = Figure(figsize=(6.4, 5))
-        settings = settings_pic
+        settings = settings_pic.copy()
         ax = fig.add_subplot(1, 1, 1)
         ax.set_title(datapoint.category, fontsize=FONT_SIZES["title"])
 
     imshow_args = datapoint.imshowargs.copy()
 
-    if imshow_args["cmap"] == "jp_temperature":
-        if "error" in name.lower():
-            _apply_temperature_cmap(datapoint, imshow_args)
-        else:
-            imshow_args["cmap"] = "RdBu_r"
+    if "error" in name_pic.lower():
+        imshow_args["cmap"] = "jp_linear"
+        imshow_args.pop("vmax", None)
+        imshow_args.pop("vmin", None)
+
     if dark_mode and is_streamline:
         imshow_args["cmap"] += "_dark"
 
     data_to_show = datapoint.data[100:400, 100:400] if only_inner else datapoint.data
     im = ax.imshow(data_to_show, **imshow_args)
-
     ax.invert_yaxis()
 
-    if datapoint.vmax is not None and datapoint.vmin is not None:
+    if datapoint.vmax is not None and datapoint.vmin is not None and "error" not in name_pic.lower():
         im.set_clim(datapoint.vmin, datapoint.vmax)
 
     if not (remove_axis and is_streamline):
@@ -216,56 +238,7 @@ def plot_datapoint_old(
     fig.savefig(f"{name_pic}{ext_inner}.{settings['format']}", **save_settings)
 
 
-def plot_datapoint(
-    name: str,
-    datapoint: DataToVisualize,
-    name_pic: str,
-    settings_pic: dict,
-    only_inner: bool = False,
-    remove_axis: bool = False,
-    dark_mode: bool = False,
-):
-    is_streamline = name.startswith("Streamline")
-
-    if remove_axis and is_streamline:
-        fig = Figure(figsize=(8, 6.5))
-        # Use a copy to avoid side effects on the settings dict
-        settings = settings_pic.copy()
-        settings["bbox_inches"] = "tight"
-        settings["pad_inches"] = 0
-
-        ax = fig.add_axes([0, 0, 1, 1])
-        ax.axis("off")
-    else:
-        fig = Figure(figsize=(8.4, 6.5))
-        settings = settings_pic
-        ax = fig.add_subplot(1, 1, 1)
-        settings["bbox_inches"] = "tight"
-        ax.tick_params(axis="both", which="major", labelsize=20)
-
-    imshow_args = datapoint.imshowargs.copy()
-
-    if "error" in name_pic.lower():
-        imshow_args["cmap"] = "jp_linear"
-        imshow_args["vmax"] = None
-        imshow_args["vmin"] = None
-
-    data_to_show = datapoint.data[100:400, 100:400] if only_inner else datapoint.data
-    im = ax.imshow(data_to_show, **imshow_args)
-
-    if "error" not in name_pic.lower() and datapoint.vmax is not None and datapoint.vmin is not None:
-        im.set_clim(datapoint.vmin, datapoint.vmax)
-
-    if not (remove_axis and is_streamline):
-        aligned_colorbar(ax, im)
-        fig.set_tight_layout(True)
-
-    ext_inner = "_inner" if only_inner else ""
-    fig.savefig(f"{name_pic}{ext_inner}.{settings['format']}", **settings)
-
-
-# TODO: merge together
-def plot_datafields_old(
+def plot_datafields(
     data: dict[str, DataToVisualize],
     name_pic: str,
     settings_pic: dict,
@@ -301,68 +274,84 @@ def plot_datafields_old(
         fig.savefig(f"{name_pic}{ext_inner}.{settings_pic['format']}", **save_settings)
     else:
         for name, datapoint in data.items():
-            plot_datapoint(name, datapoint, f"{name_pic}_{name}", settings_pic, only_inner)
-
-
-def plot_datafields(
-    data: dict[str, DataToVisualize],
-    name_pic: str,
-    settings_pic: dict,
-    only_inner: bool = False,
-    plot_all_in_1_pic: bool = True,
-):
-    if plot_all_in_1_pic:
-        num_subplots = len(data)
-        fig = Figure(figsize=(8.4, num_subplots * 4))
-
-        axes = fig.subplots(num_subplots, 1, sharex=True)
-        if num_subplots == 1:
-            axes = [axes]
-
-        for index, (_, datapoint) in enumerate(data.items()):
-            ax = axes[index]
-            ax.set_title(datapoint.category, fontsize=16)
-
-            data_to_show = datapoint.data[100:400, 100:400] if only_inner else datapoint.data
-            ax.imshow(data_to_show, **datapoint.imshowargs)
-
-            ax.invert_yaxis()
-            ax.set_ylabel("x [m]", fontsize=20)
-            ax.tick_params(axis="both", which="major", labelsize=20)
-
-        axes[-1].set_xlabel("y [m]", fontsize=20)
-        fig.set_tight_layout(True)
-
-        ext_inner = "_inner" if only_inner else ""
-        fig.savefig(f"{name_pic}{ext_inner}.{settings_pic['format']}", **settings_pic)
-    else:
-        for name, datapoint in data.items():
             log.info(f"Plotting {name}...")
             plot_datapoint(name, datapoint, f"{name_pic}_{name}", settings_pic, only_inner)
 
 
-def prepare_data_to_plot_sequential_outputs(
-    y: torch.Tensor, y_out: torch.Tensor, plot_true: bool, info: dict, tiled: bool
+def prepare_data_to_plot_sequential(
+    datasetType: DatasetType, x: torch.Tensor, y: torch.Tensor, y_out: torch.Tensor, info: dict
 ):
-    # prepare data of temperature true, temperature out, error, physical variables (inputs)
-    # required_size = y_out.shape[-2:]
-    # start_pos = ((y.shape[1] - required_size[1])//2, (y.shape[2] - required_size[2])//2)
-    # y_reduced = y[:,start_pos[0]:start_pos[0]+required_size[1], start_pos[1]:start_pos[1]+required_size[2]]
-    y_reduced = y.squeeze_(1)[..., 10:-10, 10:-10]
-    y_out = y_out.squeeze_(1)[..., 10:-10, 10:-10]
-    outs_max = [max(y_reduced.max(), y_out.max()) for idx in range(len(y_reduced))]
-    outs_min = [min(y_reduced.min(), y_out.min()) for idx in range(len(y_reduced))]
-    extent_highs_y = np.array(info["CellsSize"][:2]) * y_out.shape[-2:]
+    y_reduced = y.squeeze_()
+    y_out = y_out.squeeze_()
+    outs_max = [max(y_reduced.max(), y_out.max()) for _ in range(len(y_reduced))]
+    outs_min = [min(y_reduced.min(), y_out.min()) for _ in range(len(y_reduced))]
+    extent_highs_y = tuple(np.array(info["CellsSize"][:2]) * y_out.shape[-2:])
 
     dict_to_plot = {}
     labels = info["Labels"].keys()
 
+    for label in labels:
+        index = info["Labels"][label]["index"]
+        for time_step in range(y_reduced.shape[0]):
+            dict_to_plot[f"{label}_true at time {time_step}"] = DataToVisualize(
+                datasetType,
+                y_reduced[time_step],
+                "Label",
+                label,
+                extent_highs_y,
+                vmax=outs_max[index],
+                vmin=outs_min[index],
+            )
+            dict_to_plot[f"{label}_out at time {time_step}"] = DataToVisualize(
+                datasetType,
+                y_out[time_step],
+                "Prediction",
+                label,
+                extent_highs_y,
+                vmax=outs_max[index],
+                vmin=outs_min[index],
+            )
+            dict_to_plot[f"{label}_error at time {time_step}"] = DataToVisualize(
+                datasetType,
+                torch.abs(y_reduced[time_step] - y_out[time_step]),
+                "Absolute Error",
+                label,
+                extent_highs_y,
+            )
+
+    for input_name in info["Inputs"].keys():
+        index = info["Inputs"][input_name]["index"]
+        extent_vals = tuple(np.array(info["CellsSize"][:2]) * x.shape[-2:])
+        dict_to_plot[input_name] = DataToVisualize(
+            datasetType, x[index].squeeze_(), "Input", input_name, extent_vals
+        )
+
+    return dict_to_plot
+
+
+def prepare_data_to_plot_sequential_outputs(
+    datasetType: DatasetType,
+    y: torch.Tensor,
+    y_out: torch.Tensor,
+    plot_true: bool,
+    info: dict,
+    tiled: bool,
+):
+    y_reduced = y.squeeze_(1)[..., 10:-10, 10:-10]
+    y_out = y_out.squeeze_(1)[..., 10:-10, 10:-10]
+    outs_max = [max(y_reduced.max(), y_out.max()) for _ in range(len(y_reduced))]
+    outs_min = [min(y_reduced.min(), y_out.min()) for _ in range(len(y_reduced))]
+    extent_highs_y = tuple(np.array(info["CellsSize"][:2]) * y_out.shape[-2:])
+
+    dict_to_plot = {}
+    labels = info["Labels"].keys()
     tiled_str = " tiled" if tiled else ""
 
     if y_reduced.dim() > 3:
         y_reduced = y_reduced.squeeze_(0)
     if y_out.dim() > 3:
         y_out = y_out.squeeze_(0)
+
     for label in labels:
         index = info["Labels"][label]["index"]
         for time_step in range(y_reduced.shape[0]):
@@ -371,65 +360,84 @@ def prepare_data_to_plot_sequential_outputs(
             )
             if plot_true:
                 dict_to_plot[f"{label}_true_at_time_{time_step}{tiled_str}"] = DataToVisualize(
-                    y_reduced[time_step], "Label", label, extent_highs_y, vmax=outs_max[index], vmin=outs_min[index]
+                    datasetType,
+                    y_reduced[time_step],
+                    "Label",
+                    label,
+                    extent_highs_y,
+                    vmax=outs_max[index],
+                    vmin=outs_min[index],
                 )
             dict_to_plot[f"{label}_out_at_time_{time_step}{tiled_str}"] = DataToVisualize(
-                y_out[time_step], "Prediction", label, extent_highs_y, vmax=outs_max[index], vmin=outs_min[index]
+                datasetType,
+                y_out[time_step],
+                "Prediction",
+                label,
+                extent_highs_y,
+                vmax=outs_max[index],
+                vmin=outs_min[index],
             )
             dict_to_plot[f"{label}_error_at_time_{time_step}{tiled_str}"] = DataToVisualize(
-                torch.abs(y_reduced[time_step] - y_out[time_step]), "Absolute Error", label, extent_highs_y
+                datasetType,
+                torch.abs(y_reduced[time_step] - y_out[time_step]),
+                "Absolute Error",
+                label,
+                extent_highs_y,
             )
 
     return dict_to_plot
 
 
-def prepare_data_to_plot_sequential_inputs(x: torch.Tensor, y: torch.Tensor, info: dict):
-    # prepare data of temperature true, temperature out, error, physical variables (inputs)
-    # start_pos = ((y.shape[1] - required_size[1])//2, (y.shape[2] - required_size[2])//2)
-    # y_reduced = y[:,start_pos[0]:start_pos[0]+required_size[1], start_pos[1]:start_pos[1]+required_size[2]]
-    # y_reduced = y.squeeze_(1)
-
+def prepare_data_to_plot_sequential_inputs(
+    datasetType: DatasetType, x: torch.Tensor, y: torch.Tensor, info: dict
+):
     dict_to_plot = {}
-
     inputs = info["Inputs"].keys()
-    only_temp = False
-    if not only_temp:
-        for input_name in inputs:
-            index = info["Inputs"][input_name]["index"]
-            dict_to_plot[f"{input_name}"] = DataToVisualize(
-                x[index, 0].squeeze_(), "Input", input_name, (np.array(info["CellsSize"][:2]) * x.shape[-2:])
+    extent_vals = tuple(np.array(info["CellsSize"][:2]) * x.shape[-2:])
+
+    for input_name in inputs:
+        index = info["Inputs"][input_name]["index"]
+        dict_to_plot[input_name] = DataToVisualize(
+            datasetType, x[index, 0].squeeze_(), "Input", input_name, extent_vals
+        )
+
+    for i, input_name in enumerate(["Absolute Times", "Gap times"]):
+        for time in range(x.size(1)):
+            dict_to_plot[f"{input_name}_t{time}"] = DataToVisualize(
+                datasetType,
+                x[i + len(inputs), time].squeeze_(),
+                f"Time step {time}",
+                input_name,
+                extent_vals,
             )
 
-        for i, input_name in enumerate(["Absolute Times", "Gap times"]):
-            for time in range(x.size(1)):
-                dict_to_plot[f"{input_name}_t{time}"] = DataToVisualize(
-                    x[i + len(inputs), time].squeeze_(),
-                    f"Time step {time}",
-                    input_name,
-                    (np.array(info["CellsSize"][:2]) * x.shape[-2:]),
-                )
+    if "Temperature [C]" in info["Labels"]:
+        temp_idx = info["Labels"]["Temperature [C]"]["index"]
+        if y.dim() == 4:
+            temp_data = y[temp_idx, 0]
+        elif y.dim() == 3:
+            temp_data = y[0]
+        else:
+            temp_data = y[temp_idx]
+    else:
+        temp_data = x[-1].squeeze_()
+        if isinstance(temp_data, torch.Tensor) and temp_data.dim() == 3:
+            temp_data = temp_data[0]
 
     dict_to_plot["Temperature"] = DataToVisualize(
-        x[-1].squeeze_(), "Input", "Temperature [C]", (np.array(info["CellsSize"][:2]) * x.shape[-2:])
+        datasetType, temp_data, "Input", "Temperature [C]", extent_vals
     )
 
     return dict_to_plot
 
 
 def plot_datafields_sequential(data: dict[str, DataToVisualize], name_pic: str, settings_pic: dict):
-    """
-    Groups entries by physical_property, then plots one figure per property
-    with one subplot per timestep arranged horizontally.
-
-    Expects keys in format "{input_name}_t{timestep}".
-    """
-    # Group by physical_property
+    """Groups entries by physical_property, plots one figure per property with horizontal timesteps."""
     from collections import defaultdict
 
-    groups = defaultdict(dict)  # property -> {timestep: DataToVisualize}
+    groups = defaultdict(dict)
 
     for key, datapoint in data.items():
-        # Extract timestep from key suffix "_t{n}"
         try:
             t = int(key.rsplit("_t", 1)[-1])
         except ValueError:
@@ -447,7 +455,7 @@ def plot_datafields_sequential(data: dict[str, DataToVisualize], name_pic: str, 
 
         for ax, t in zip(axes, timesteps, strict=False):
             datapoint = timestep_dict[t]
-            ax.set_title(f"{datapoint.category}", fontsize=FONT_SIZES["title"])  # e.g. "Time step 0"
+            ax.set_title(datapoint.category, fontsize=FONT_SIZES["title"])
             im = ax.imshow(datapoint.data, **datapoint.imshowargs)
             ax.invert_yaxis()
             ax.set_xlabel("y [m]", fontsize=FONT_SIZES["axis_label"])
@@ -459,7 +467,6 @@ def plot_datafields_sequential(data: dict[str, DataToVisualize], name_pic: str, 
         fig.suptitle(prop_name, fontsize=FONT_SIZES["suptitle"])
         fig.set_tight_layout(True)
 
-        # Sanitize property name for use as filename
         safe_name = prop_name.replace("/", "_").replace(" ", "_").replace("[", "").replace("]", "")
         save_settings = settings_pic.copy()
         for key, value in SAVEFIG_DEFAULTS.items():
@@ -468,7 +475,6 @@ def plot_datafields_sequential(data: dict[str, DataToVisualize], name_pic: str, 
 
 
 def reverse_norm_one_dp_sequence(x: torch.Tensor, y: torch.Tensor, y_out: torch.Tensor, norm: NormalizeTransform):
-    # reverse transform for plotting real values
     x = norm.reverse(x.detach().cpu(), "Inputs")
     y = norm.reverse(y.detach().cpu(), "Labels")
     try:
@@ -497,44 +503,6 @@ def reverse_norm_one_dp_inputs(x: torch.Tensor, y: torch.Tensor, norm: Normalize
     return x_rev, y_rev
 
 
-def _region_has_values_over_threshold(
-    sample: torch.Tensor,
-    channel_idx: int = 5,
-    x_range: tuple[int, int] = (20, 50),
-    y_range: tuple[int, int] = (20, 50),
-    threshold: float = 0.5,
-) -> bool:
-    if not isinstance(sample, torch.Tensor):
-        return False
-
-    data = sample
-    if sample.dim() == 4:
-        if sample.shape[1] > channel_idx:
-            data = sample[0, channel_idx]
-        elif sample.shape[0] > channel_idx:
-            data = sample[channel_idx]
-        else:
-            return False
-    elif sample.dim() == 3:
-        if sample.shape[0] <= channel_idx:
-            return False
-        data = sample[channel_idx]
-    elif sample.dim() != 2:
-        return False
-
-    x0, x1 = x_range
-    y0, y1 = y_range
-    x0 = max(0, x0)
-    y0 = max(0, y0)
-    x1 = min(data.shape[0] - 1, x1)
-    y1 = min(data.shape[1] - 1, y1)
-    if x1 < x0 or y1 < y0:
-        return False
-
-    region = data[x0 : x1 + 1, y0 : y1 + 1]
-    return region.max().item() > threshold
-
-
 def prepare_data_to_plot_inputs(
     datasetType: DatasetType, x: torch.Tensor, y: torch.Tensor, info: dict
 ) -> dict[str, DataToVisualize]:
@@ -553,23 +521,23 @@ def prepare_data_to_plot_inputs(
     dict_to_plot = {}
     for input_name, input_info in info["Inputs"].items():
         idx = input_info["index"]
-        extent_vals = np.array(info["CellsSize"][:2]) * x.shape[-2:]
+        extent_vals = tuple(np.array(info["CellsSize"][:2]) * x.shape[-2:])
         dict_to_plot[input_name] = DataToVisualize(
             datasetType=datasetType,
             data=x[idx],
             category="",
             physical_property=input_name,
-            extent_highs=tuple(extent_vals),
+            extent_highs=extent_vals,
         )
     for label_name, label_info in info["Labels"].items():
         idx = label_info["index"]
-        extent_vals = np.array(info["CellsSize"][:2]) * y.shape[-2:]
+        extent_vals = tuple(np.array(info["CellsSize"][:2]) * y.shape[-2:])
         dict_to_plot[f"{label_name}_true"] = DataToVisualize(
             datasetType=datasetType,
             data=y_reduced[idx],
             category="Label",
             physical_property=label_name,
-            extent_highs=tuple(extent_vals),
+            extent_highs=extent_vals,
             vmax=outs_max[idx],
             vmin=outs_min[idx],
         )
@@ -592,20 +560,26 @@ def prepare_data_to_plot_outputs(
     outs_max = [y_reduced[i].max().item() for i in range(num_channels)]
     outs_min = [y_reduced[i].min().item() for i in range(num_channels)]
 
-    extent_vals = np.array(info["CellsSize"][:2]) * y_out.shape[-2:]
+    extent_vals = tuple(np.array(info["CellsSize"][:2]) * y_out.shape[-2:])
     dict_to_plot = {}
 
     if lic:
         import lic
 
         index = info["Labels"]["Liquid X-Velocity [m_per_y]"]["index"]
-        temp_x = y_reduced[index].cpu().numpy()  # Auf CPU/NumPy konvertieren
+        temp_x = y_reduced[index].cpu().numpy()
         index = info["Labels"]["Liquid Y-Velocity [m_per_y]"]["index"]
-        temp_y = y_reduced[index].cpu().numpy()  # Auf CPU/NumPy konvertieren
+        temp_y = y_reduced[index].cpu().numpy()
 
         lic_result = lic.lic(temp_y, temp_x, length=30)
         dict_to_plot["LIC"] = DataToVisualize(
-            lic_result, "LIC", "LIC", extent_vals, vmax=np.max(lic_result), vmin=np.min(lic_result)
+            datasetType,
+            lic_result,
+            "LIC",
+            "Line Integral Convolution",
+            extent_vals,
+            vmax=np.max(lic_result),
+            vmin=np.min(lic_result),
         )
 
     for label_name, label_info in info["Labels"].items():
@@ -615,7 +589,7 @@ def prepare_data_to_plot_outputs(
             data=y_out[idx],
             category="Prediction",
             physical_property=label_name,
-            extent_highs=tuple(extent_vals),
+            extent_highs=extent_vals,
             vmax=outs_max[idx],
             vmin=outs_min[idx],
         )
@@ -624,7 +598,7 @@ def prepare_data_to_plot_outputs(
             data=torch.abs(y_reduced[idx] - y_out[idx]),
             category="Absolute Error",
             physical_property=label_name,
-            extent_highs=tuple(extent_vals),
+            extent_highs=extent_vals,
         )
 
     return dict_to_plot
@@ -644,16 +618,15 @@ def plot_output_over_input(
     for index, (name, input_datapoint) in enumerate(input_data.items()):
         imshow_args = input_datapoint.imshowargs.copy()
 
-        if imshow_args["cmap"] == "jp_temperature":
-            # TODO: in einer neueren Version habe sind datasetTypes eingeführt worden
-            _apply_temperature_cmap(input_datapoint, imshow_args)
-
         ax = axes[index]
         ax.set_title(
-            f"{input_datapoint.category} (Input: {input_datapoint.physical_property})", fontsize=FONT_SIZES["title"]
+            f"{input_datapoint.category} (Input: {input_datapoint.physical_property})",
+            fontsize=FONT_SIZES["title"],
         )
 
-        # Resolve output datapoint robustly: direct-key match, same property, or fallback to temperature.
+        data_to_show_input = input_datapoint.data
+        ax.imshow(data_to_show_input, **imshow_args, alpha=0.6)
+
         output_datapoint = None
         candidate_names = [name, name.replace("_true", "_out"), name.replace("_out", "_true")]
         for candidate in candidate_names:
@@ -674,10 +647,9 @@ def plot_output_over_input(
                     break
 
         if output_datapoint is not None:
-            imshow_args = output_datapoint.imshowargs.copy()
-
-            if imshow_args["cmap"] == "jp_temperature":
-                _apply_temperature_cmap(output_datapoint, imshow_args)
+            data_to_show_output = output_datapoint.data
+            output_imshow_args = output_datapoint.imshowargs.copy()
+            ax.imshow(data_to_show_output, **output_imshow_args, alpha=0.4)
 
         ax.invert_yaxis()
         ax.set_ylabel("x [m]", fontsize=FONT_SIZES["axis_label"])
@@ -691,80 +663,6 @@ def plot_output_over_input(
     fig.savefig(f"{name_pic}.{settings_pic['format']}", **save_settings)
 
 
-# TODO: merge together
-def visualize_inputs_old(
-    datasetType: DatasetType,
-    dataloader,
-    args: dict,
-    amount_datapoints_to_visu: int = inf,
-    plot_path: str = "default",
-    pic_format: str = "png",
-    target_match: int = 1,
-):
-    log.info("Visualizing Inputs...")
-
-    try:
-        norm = dataloader.dataset.norm
-        info = dataloader.dataset.info
-        dataset = dataloader.dataset
-    except AttributeError:
-        norm = dataloader.dataset.dataset.norm
-        info = dataloader.dataset.dataset.info
-        dataset = dataloader.dataset.dataset
-
-    settings_pic = {"format": pic_format, "dpi": 160}
-    is_sequential = dataset.__class__.__name__ in ["SimulationDatasetCutsSequential", "DataPointSequence", "Subset"]
-    n_subsets = len(dataset.subsets) if (is_sequential and hasattr(dataset, "subsets")) else 1
-
-    # Accumulate samples grouped by chain_idx
-    # chain_buffer: chain_idx -> {subset_idx: (x, y)}
-    chain_buffer = {}
-    plotted_count = 0
-
-    for inputs, labels, metadata_list in dataloader:
-        batch_size = inputs.shape[0]
-
-        for i in range(batch_size):
-            if is_sequential and n_subsets > 1:
-                chain_idx = metadata_list["chain_idx"][i].item()
-                subset_idx = metadata_list["subset_idx"][i].item()
-            else:
-                chain_idx = plotted_count  # treat each sample as its own chain
-                subset_idx = 0
-
-            if chain_idx not in chain_buffer:
-                chain_buffer[chain_idx] = {}
-            chain_buffer[chain_idx][subset_idx] = (inputs[i], labels[i])
-
-            # Only plot when we have collected all subsets for this chain
-            if len(chain_buffer[chain_idx]) < n_subsets:
-                continue
-
-            if plotted_count >= amount_datapoints_to_visu:
-                return
-
-            # --- Build combined dict across all subsets ---
-            combined_dict = {}
-            for s_idx in sorted(chain_buffer[chain_idx].keys()):
-                x_s, y_s = chain_buffer[chain_idx][s_idx]
-                x_rev, y_rev = reverse_norm_one_dp_inputs(x_s, y_s, norm)
-
-                if is_sequential:
-                    sub_dict = prepare_data_to_plot_sequential_inputs(x_rev, y_rev, info)
-                    # Prefix keys with subset index so plots don't overwrite each other
-                    sub_dict = {f"subset{s_idx}_{k}": v for k, v in sub_dict.items()}
-                else:
-                    sub_dict = prepare_data_to_plot_inputs(x_rev, y_rev, info)
-
-                combined_dict.update(sub_dict)
-
-            name_pic = f"{plot_path}_{plotted_count}_input"
-            plot_datafields(combined_dict, name_pic, settings_pic, only_inner=False, plot_all_in_1_pic=False)
-
-            del chain_buffer[chain_idx]  # free memory
-            plotted_count += 1
-
-
 def visualize_inputs(
     datasetType: DatasetType,
     dataloader,
@@ -775,78 +673,26 @@ def visualize_inputs(
 ):
     log.info("Visualizing Inputs...")
 
-    total_samples = len(dataloader.dataset)
-    limit = min(amount_datapoints_to_visu, total_samples)
+    if dataloader.dataset.__class__.__name__ == "SimulationDatasetCutsSequential":
+        log.info("Skipping input visualization for SimulationDatasetCutsSequential training cutouts.")
+        return
 
-    try:
-        norm = dataloader.dataset.norm
-        info = dataloader.dataset.info
-        dataset = dataloader.dataset
-    except AttributeError:
-        norm = dataloader.dataset.dataset.norm
-        info = dataloader.dataset.dataset.info
-        dataset = dataloader.dataset.dataset
-
+    norm, info, dataset = _get_dataset_context(dataloader)
     settings_pic = {"format": pic_format, "dpi": 160}
-    current_count = 0
-
-    for inputs, labels in dataloader:
-        log.info(inputs.shape, labels.shape, "shape of inputs and labels")
-        batch_size = inputs.shape[0]
-
-        for i in range(batch_size):
-            if current_count >= limit:
-                return
-
-            name_pic = f"{plot_path}_{current_count}_input"
-            x, y = reverse_norm_one_dp_inputs(inputs[i], labels[i], norm)
-
-            dict_to_plot = prepare_data_to_plot_inputs(datasetType, x, y, info)
-            plot_datafields(dict_to_plot, name_pic, settings_pic, only_inner=False, plot_all_in_1_pic=False)
-
-            current_count += 1
-
-
-# TODO: merge together
-def visualize_outputs_old(
-    datasetType: DatasetType,
-    model,
-    dataloader,
-    args: dict,
-    amount_datapoints_to_visu: int = inf,
-    plot_path: str = "default",
-    pic_format: str = "png",
-    scaleBounds=None,
-    useNonLinearCmap: bool = None,
-    target_match: int = 1,
-    plot_true: bool = True,
-):
-    log.info("Visualizing Outputs...")
-
-    try:
-        norm = dataloader.dataset.norm
-        info = dataloader.dataset.info
-        dataset = dataloader.dataset
-    except AttributeError:
-        norm = dataloader.dataset.dataset.norm
-        info = dataloader.dataset.dataset.info
-        dataset = dataloader.dataset.dataset
-
-    settings_pic = {"format": pic_format, "dpi": 160}
-    device = args["device"]
-    is_sequential = dataset.__class__.__name__ in ["SimulationDatasetCutsSequential", "DataPointSequence", "Subset"]
+    is_sequential = _is_sequential_dataset(dataset)
     n_subsets = len(dataset.subsets) if (is_sequential and hasattr(dataset, "subsets")) else 1
 
-    chain_buffer = {}  # chain_idx -> {subset_idx: (x, y)}
+    chain_buffer = {}
     plotted_count = 0
 
-    for inputs, labels, metadata_list in dataloader:
+    for batch in dataloader:
+        inputs, labels, metadata = _unpack_batch(batch)
         batch_size = inputs.shape[0]
 
         for i in range(batch_size):
-            if is_sequential and n_subsets > 1:
-                chain_idx = metadata_list["chain_idx"][i].item()
-                subset_idx = metadata_list["subset_idx"][i].item()
+            if is_sequential and n_subsets > 1 and metadata is not None:
+                chain_idx = metadata["chain_idx"][i].item()
+                subset_idx = metadata["subset_idx"][i].item()
             else:
                 chain_idx = plotted_count
                 subset_idx = 0
@@ -861,33 +707,21 @@ def visualize_outputs_old(
             if plotted_count >= amount_datapoints_to_visu:
                 return
 
-            # --- Run inference and build combined dict across all subsets ---
             combined_dict = {}
-            init_frame = None
             for s_idx in sorted(chain_buffer[chain_idx].keys()):
                 x_s, y_s = chain_buffer[chain_idx][s_idx]
+                x_rev, y_rev = reverse_norm_one_dp_inputs(x_s, y_s, norm)
 
-                tiled = x_s.shape[-1] > 1000 or x_s.shape[-2] > 1000
                 if is_sequential:
-                    if tiled:
-                        y_out_raw = model.infer_tiled(x_s.unsqueeze(0), device)
-                    else:
-                        y_out_raw = model.infer(x_s.unsqueeze(0), device, init_frame=init_frame)
-
-                    init_frame = y_out_raw[:, :, -1]
-                    x_rev, y_rev, y_out_rev = reverse_norm_one_dp_sequence(x_s, y_s, y_out_raw, norm)
-                    sub_dict = prepare_data_to_plot_sequential_outputs(y_rev, y_out_rev, plot_true, info, tiled)
+                    sub_dict = prepare_data_to_plot_sequential_inputs(datasetType, x_rev, y_rev, info)
+                    if n_subsets > 1:
+                        sub_dict = {f"subset{s_idx}_{k}": v for k, v in sub_dict.items()}
                 else:
-                    y_out_raw = model.infer(x_s.unsqueeze(0), device)
-                    y_out_rev = reverse_norm_one_dp_outputs(y_out_raw, norm)
-                    _, y_rev = reverse_norm_one_dp_inputs(x_s, y_s, norm)
-                    sub_dict = prepare_data_to_plot_outputs(y_rev, y_out_rev, info)
+                    sub_dict = prepare_data_to_plot_inputs(datasetType, x_rev, y_rev, info)
 
-                # Prefix to keep subsets distinct in the combined plot
-                sub_dict = {f"subset{s_idx}_{k}": v for k, v in sub_dict.items()}
                 combined_dict.update(sub_dict)
 
-            name_pic = f"{plot_path}_{plotted_count}_output"
+            name_pic = f"{plot_path}_{plotted_count}_input"
             plot_datafields(combined_dict, name_pic, settings_pic, only_inner=False, plot_all_in_1_pic=False)
 
             del chain_buffer[chain_idx]
@@ -904,59 +738,79 @@ def visualize_outputs(
     pic_format: str = "png",
     scaleBounds=None,
     useNonLinearCmap: bool = None,
+    plot_true: bool = True,
 ):
     log.info("Visualizing Outputs...")
-    total_samples = len(dataloader.dataset)
-    limit = min(amount_datapoints_to_visu, total_samples)
 
-    try:
-        norm = dataloader.dataset.norm
-        info = dataloader.dataset.info
-        dataset = dataloader.dataset
-    except AttributeError:
-        norm = dataloader.dataset.dataset.norm
-        info = dataloader.dataset.dataset.info
-        dataset = dataloader.dataset.dataset
-
+    norm, info, dataset = _get_dataset_context(dataloader)
     settings_pic = {"format": pic_format, "dpi": 160}
-    current_count = 0
     device = args["device"]
+    is_sequential = _is_sequential_dataset(dataset)
+    n_subsets = len(dataset.subsets) if (is_sequential and hasattr(dataset, "subsets")) else 1
 
-    for inputs, labels in dataloader:
-        log.info(inputs.shape, labels.shape, "shape of inputs and labels")
+    chain_buffer = {}
+    plotted_count = 0
+
+    for batch in dataloader:
+        inputs, labels, metadata = _unpack_batch(batch)
         batch_size = inputs.shape[0]
 
         for i in range(batch_size):
-            if current_count >= limit:
+            if is_sequential and n_subsets > 1 and metadata is not None:
+                chain_idx = metadata["chain_idx"][i].item()
+                subset_idx = metadata["subset_idx"][i].item()
+            else:
+                chain_idx = plotted_count
+                subset_idx = 0
+
+            if chain_idx not in chain_buffer:
+                chain_buffer[chain_idx] = {}
+            chain_buffer[chain_idx][subset_idx] = (inputs[i], labels[i])
+
+            if len(chain_buffer[chain_idx]) < n_subsets:
+                continue
+
+            if plotted_count >= amount_datapoints_to_visu:
                 return
 
-            name_pic = f"{plot_path}_{current_count}_output"
-            x = inputs[i]
-            y = labels[i]
-            if dataloader.dataset.__class__.__name__ == "SimulationDatasetCutsSequential":
-                y_out = model.infer(x.unsqueeze(0), args["device"])
+            combined_dict = {}
+            init_frame = None
+            for s_idx in sorted(chain_buffer[chain_idx].keys()):
+                x_s, y_s = chain_buffer[chain_idx][s_idx]
+                tiled = x_s.shape[-1] > 1000 or x_s.shape[-2] > 1000
 
-                x = x[:-1]
-                x, y, y_out = reverse_norm_one_dp_sequence(x, y, y_out, norm)
-                dict_to_plot = prepare_data_to_plot_sequential(datasetType, x, y, y_out, info)
-            else:
-                # deepcopy to avoid in-place operations messing up gradients
-                x_copy = deepcopy(x)
-                y_copy = deepcopy(y)
+                if is_sequential:
+                    if tiled and hasattr(model, "infer_tiled"):
+                        y_out_raw = model.infer_tiled(x_s.unsqueeze(0), device)
+                    else:
+                        y_out_raw = model.infer(x_s.unsqueeze(0), device, init_frame=init_frame)
 
-                y_out_raw = model.infer(x_copy.unsqueeze(0), device)
+                    if hasattr(y_out_raw, "shape") and y_out_raw.ndim >= 3:
+                        init_frame = y_out_raw[:, :, -1]
 
-                y_out = reverse_norm_one_dp_outputs(y_out_raw, norm)
-                _, y_denorm = reverse_norm_one_dp_inputs(x_copy, y_copy, norm)
+                    x_rev, y_rev, y_out_rev = reverse_norm_one_dp_sequence(x_s, y_s, y_out_raw, norm)
+                    sub_dict = prepare_data_to_plot_sequential_outputs(
+                        datasetType, y_rev, y_out_rev, plot_true, info, tiled
+                    )
+                else:
+                    y_out_raw = model.infer(x_s.unsqueeze(0), device)
+                    y_out_rev = reverse_norm_one_dp_outputs(y_out_raw, norm)
+                    _, y_rev = reverse_norm_one_dp_inputs(x_s, y_s, norm)
+                    sub_dict = prepare_data_to_plot_outputs(datasetType, y_rev, y_out_rev, info)
 
-                dict_to_plot = prepare_data_to_plot_outputs(datasetType, y_denorm, y_out, info, lic=False)
+                if n_subsets > 1:
+                    sub_dict = {f"subset{s_idx}_{k}": v for k, v in sub_dict.items()}
+                combined_dict.update(sub_dict)
 
-            plot_datafields(dict_to_plot, name_pic, settings_pic, only_inner=False, plot_all_in_1_pic=False)
+            name_pic = f"{plot_path}_{plotted_count}_output"
+            plot_datafields(combined_dict, name_pic, settings_pic, only_inner=False, plot_all_in_1_pic=False)
 
-            current_count += 1
+            del chain_buffer[chain_idx]
+            plotted_count += 1
 
 
 def visualize_outputs_over_inputs(
+    datasetType: DatasetType,
     model: UNet,
     dataloader,
     args: dict,
@@ -965,105 +819,63 @@ def visualize_outputs_over_inputs(
     pic_format: str = "png",
 ):
     log.info("Visualizing Outputs over Inputs...")
-    total_samples = len(dataloader.dataset)
-    limit = min(amount_datapoints_to_visu, total_samples)
-    log.info(f"Total samples: {total_samples}, Limit: {limit}")
+    limit = min(amount_datapoints_to_visu, len(dataloader.dataset))
 
-    try:
-        norm = dataloader.dataset.norm
-        info = dataloader.dataset.info
-    except AttributeError:
-        norm = dataloader.dataset.dataset.norm
-        info = dataloader.dataset.dataset.info
-
-    log.info("Normalization and info loaded successfully")
-
+    norm, info, dataset = _get_dataset_context(dataloader)
     settings_pic = {"format": pic_format, "dpi": 160}
-    current_count = 0
     device = args["device"]
-    log.info(f"Device: {device}, plot_path: {plot_path}")
+    is_sequential = _is_sequential_dataset(dataset)
 
-    overfit = args.get("overfit", False)
-    overfit_on = args.get("overfit_on", None)
-    log.info(f"Overfit mode: {overfit}, overfit_on: {overfit_on}")
+    current_count = 0
 
-    for batch, (inputs, labels, _) in enumerate(dataloader):
+    for batch in dataloader:
+        inputs, labels, _metadata = _unpack_batch(batch)
         batch_size = inputs.shape[0]
-        log.info(f"Processing batch {batch}, batch_size: {batch_size}")
 
         for i in range(batch_size):
             if current_count >= limit:
-                log.info(f"Reached limit ({limit}), stopping visualization")
                 return
 
             threshold_check = _label_has_midcell_above_threshold(labels[i], 0.5)
             is_val = "val" in str(plot_path)
-            log.info(
-                f"Sample {current_count} (batch {batch}, idx {i}): threshold_check={threshold_check}, is_val={is_val}"
-            )
-
             if not threshold_check and not is_val:
-                log.info("  -> Skipped (threshold not met and not validation set)")
                 continue
-
-            log.info(f"  -> Processing sample {current_count}")
 
             x = inputs[i]
             y = labels[i]
 
-            dataset_class = dataloader.dataset.__class__.__name__
-            log.info(f"  Dataset class: {dataset_class}")
-
-            if dataset_class in ["SimulationDatasetCutsSequential", "DataPointSequence", "Subset"]:
-                log.info("  -> Using sequential data path")
-                # Generate prediction
+            if is_sequential:
                 y_out = model.infer(x.unsqueeze(0), device)
-
-                # Reverse normalization
                 x_t_denorm, y_denorm = reverse_norm_one_dp_inputs(x, y, norm)
                 y_out_denorm = reverse_norm_one_dp_outputs(y_out, norm)
 
-                # Prepare input data for plotting
-                input_dict = prepare_data_to_plot_sequential_inputs(x_t_denorm, y_denorm, info)
-                log.info(f"  Input dict keys: {list(input_dict.keys())}")
-
-                # Prepare output data for plotting
-                output_dict = prepare_data_to_plot_sequential_outputs(y_denorm, y_out_denorm, info)
-                log.info(f"  Output dict keys (before filtering): {list(output_dict.keys())}")
+                input_dict = prepare_data_to_plot_sequential_inputs(datasetType, x_t_denorm, y_denorm, info)
+                output_dict = prepare_data_to_plot_sequential_outputs(
+                    datasetType, y_denorm, y_out_denorm, plot_true=True, info=info, tiled=False
+                )
 
                 temp_true_dict = {
                     k: v
                     for k, v in output_dict.items()
                     if v.physical_property == "Temperature [C]" and v.category == "Label"
                 }
-                log.info(f"  Temp true dict keys: {list(temp_true_dict.keys())}")
-
                 if temp_true_dict:
                     output_dict = temp_true_dict
-                    log.info("  Using temp_true_dict")
                 else:
                     output_dict = {k: v for k, v in output_dict.items() if v.physical_property == "Temperature [C]"}
-                    log.info(f"  Using filtered output_dict with Temperature [C]: {list(output_dict.keys())}")
 
-                # Plot output overlaid on input
                 name_pic = f"{plot_path}_{current_count}_output_over_input"
-                log.info(f"  Saving plot to: {name_pic}")
                 plot_output_over_input(input_dict, output_dict, name_pic, settings_pic)
-                log.info("  Plot saved successfully")
             else:
-                log.info("  -> Using non-sequential data path")
-                # For non-sequential data, just use the single input
                 x_copy = deepcopy(x)
                 y_copy = deepcopy(y)
 
                 y_out_raw = model.infer(x_copy.unsqueeze(0), device)
-
                 y_out = reverse_norm_one_dp_outputs(y_out_raw, norm)
                 x_denorm, y_denorm = reverse_norm_one_dp_inputs(x_copy, y_copy, norm)
 
-                # Prepare input and output data for plotting
-                input_dict = prepare_data_to_plot_inputs(x_denorm, y_denorm, info)
-                output_dict = prepare_data_to_plot_outputs(y_denorm, y_out, info, lic=False)
+                input_dict = prepare_data_to_plot_inputs(datasetType, x_denorm, y_denorm, info)
+                output_dict = prepare_data_to_plot_outputs(datasetType, y_denorm, y_out, info, lic=False)
                 temp_true_dict = {
                     k: v
                     for k, v in output_dict.items()
@@ -1084,7 +896,7 @@ def visualize_streamlines(
     datasetType: DatasetType, output_name: str, prop_name: str, tensor_data: torch.Tensor
 ) -> None:
     """Generates plots for all streamlines."""
-    resolution = [12800, 12800]
+    resolution = (12800, 12800)
 
     plot_datapoint(
         name=f"Streamlines - {prop_name}",

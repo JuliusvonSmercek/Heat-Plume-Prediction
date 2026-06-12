@@ -190,7 +190,6 @@ general_configuration:
     general:
       epochs: 300
       visualize: true
-      model_path: temperature_model
     scheduler:
       type: ReduceLROnPlateau
       init_lr: 1e-3

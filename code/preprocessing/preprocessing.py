@@ -14,7 +14,7 @@ from tqdm import tqdm
 def preprocessing(args: dict):
     log.info("Preparing dataset")
     network = args["network"]
-    if is_unprepared(args["data_prep"]):
+    if is_unprepared(args["data_prep"], args.get("network")):
         info = load_yaml(args["model"] / "info.yaml") if args["case"] != "train" else None
 
         if network in ["convlstm", "rnn", "lstm"]:
@@ -32,10 +32,29 @@ def preprocessing(args: dict):
 
 
 # helper function
-def is_unprepared(path: Path):
+def is_unprepared(path: Path, network: str | None = None) -> bool:
     (path / "Inputs").mkdir(parents=True, exist_ok=True)
     (path / "Labels").mkdir(parents=True, exist_ok=True)
-    return is_empty(path / "Inputs") or is_empty(path / "Labels") or not (path / "info.yaml").exists()
+    if is_empty(path / "Inputs") or is_empty(path / "Labels") or not (path / "info.yaml").exists():
+        return True
+    label_files = sorted((path / "Labels").glob("*.pt"))
+    if not label_files:
+        return True
+    sample = torch.load(label_files[0], map_location="cpu")
+    if network in ("convlstm", "rnn", "lstm"):
+        if sample.dim() < 4:
+            log.info(
+                f"Sequence dataset requires 4D labels (C,T,H,W); found shape {tuple(sample.shape)} in "
+                f"{label_files[0].name}, re-preparing."
+            )
+            return True
+    elif network is not None and sample.dim() >= 4:
+        log.info(
+            f"Non-sequential dataset requires 3D labels (C,H,W); found shape {tuple(sample.shape)} in "
+            f"{label_files[0].name}, re-preparing."
+        )
+        return True
+    return False
 
 
 def get_time_prediction(data_path):
@@ -187,9 +206,6 @@ def prepare_dataset_for_sequence(args: dict, info: dict = None):
     inputs = expand_property_names(args["inputs"])
     outputs = expand_property_names(args["outputs"])
     times_str = load_time_steps_full_str(Path(args["data_raw"], "RUN_0", "pflotran.h5"))
-    times = load_time_steps(Path(args["data_raw"], "RUN_0", "pflotran.h5"))
-    time_init = times[0]
-    time_prediction = times[1:]
 
     pflotran_settings = load_yaml(args["data_raw"] / "inputs" / "settings.yaml")
     total_size = np.array(pflotran_settings["grid"]["size"])

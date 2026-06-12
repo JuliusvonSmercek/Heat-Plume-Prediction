@@ -129,9 +129,11 @@ class SimulationDatasetCutsSequential(SimulationDatasetCuts):
         self.inputs = torch.stack(self.inputs)  # (datapoints, channels, time, H, W)
         self.labels = torch.stack(self.labels)
 
-        # switch dim D and channels
+        # switch dim D and channels; ensure time dimension exists for (datapoints, channels, H, W)
         if len(self.inputs.shape) == 4:
             self.inputs = self.inputs.unsqueeze(2)
+        if len(self.labels.shape) == 4:
+            self.labels = self.labels.unsqueeze(2)
 
         self.inputs = self.inputs.permute(1, 0, 2, 3, 4)
         self.labels = self.labels.permute(1, 0, 2, 3, 4)

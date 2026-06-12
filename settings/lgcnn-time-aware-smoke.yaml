@@ -1,15 +1,15 @@
 run_configuration:
-  run_name: seasonal-smoke
+  run_name: time-aware-smoke
   dataset: paper-results-seasonal
   seed: 2406
-  device: cuda:3
+  device: cuda:2
   use_velocity_model: true
 
   pipeline:
     # - clean: data_prep
     - clean: results-step1
-    - clean: results-step2
     - step1: train
+    - clean: results-step2
     - step2: run
     - clean: results-step3
     - step3: train
@@ -58,7 +58,7 @@ general_configuration:
       diffusion_scale: 0.05
       diffusion_base: 1.8
     directsolver:
-      samples: 15000
+      samples: 1500
       steps: 50
     physical_parameters:
       resolution_m: 5.0
@@ -90,7 +90,7 @@ general_configuration:
           0.24658: 5.6
           0.27397: 5.6
           0.30137: 5.6
-          0.32877: 15.6
+          0.32877: 15.6                     # Start of seasonal heating phase
           0.35616: 15.6
           0.38356: 15.6
           0.41096: 15.6
@@ -105,7 +105,7 @@ general_configuration:
           0.65753: 15.6
           0.68493: 15.6
           0.71233: 15.6
-          0.73973: 5.6
+          0.73973: 5.6                      # Return to cooling phase
           0.76712: 5.6
           0.79452: 5.6
           0.82192: 5.6
@@ -165,7 +165,8 @@ general_configuration:
       test: [23]
     general:
       epochs: 1
-      visualize: true
+      visualize: false
+      visualize_interval: null
     scheduler:
       type: ReduceLROnPlateau
       init_lr: 1e-3
@@ -175,24 +176,43 @@ general_configuration:
       threshold: 1e-3
       min_lr: 1e-6
     model_parameters:
-      network: unet
-      inputs: [p, k, i, x, y, 1, 2, 3, 5, 7]
+      network: rnn
+      inputs: [i, k, 1,5,7]
       outputs: [t]
-      batchsize: 20
-      kernel_size: 3
-      depth: 3
-      init_features: 64
+      batchsize: 1
       stride: 1
       dilation: 1
-      norm: batchnorm # instancenorm, groupnorm
+      norm: batchnorm
       repeat_inner: false
-      skip_per_dir: 8
-      len_box: 256
+      skip_per_dir: 16
+      len_box: 64
       train_loss: Huber
       bool_cutouts: true
       optimizer_switch: false
       optimizer: AdamW
-      activation: LeakyReLU
+      activation: ReLU
+      time_steps_to_predict: [[1,2,3,4],[52,53,54,55]]
+      visualize_interval: 10
+      overfit_on: null
+      rnn_num_layers: 2
+      dec_conv_features:
+      - 128
+      - 64
+      - 32
+      - 16
+      dec_kernel_sizes:
+      - 5
+      - 3
+      - 3
+      - 3
+      enc_conv_features:
+      - 32
+      - 64
+      - 128
+      enc_kernel_sizes:
+      - 3
+      - 3
+      - 5
 
 paths:
   datasets_raw: ./datasets

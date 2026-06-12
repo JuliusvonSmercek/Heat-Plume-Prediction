@@ -214,9 +214,25 @@ class Solver:
         else:
             raise ValueError(f"Unknown scheduler type: {args['scheduler'].type}")
 
-        early_stop_patience = scheduler.patience * 2
+        early_stop_patience = 300 #scheduler.patience * 2 # TODO
         early_stop_counter = 0
         min_delta = 1e-6
+
+        if True: #visualize:
+            vis_dataloader = DataLoader(
+                        train_dataloader.dataset,
+                        batch_size=train_dataloader.batch_size,
+                        shuffle=False,
+                        num_workers=0,
+                        pin_memory=False,
+                        drop_last=False)
+            vis_dataloader_val = DataLoader(
+                val_dataloader.dataset,
+                batch_size=val_dataloader.batch_size,
+                shuffle=False,
+                num_workers=0,
+                pin_memory=False,
+                drop_last=False)
 
         try:
             for epoch in epochs:
@@ -277,15 +293,15 @@ class Solver:
                 if self.best_model_params is not None and vis_interval is not None and epoch % vis_interval == 0:
                     with torch.no_grad():
                         model_tmp = deepcopy(self.model)
-                        visualize_outputs(
-                            datasetType,
-                            model_tmp,
-                            val_dataloader,
-                            args,
-                            plot_path=args["destination"] / f"temp{epoch}",
-                            amount_datapoints_to_visu=1,
-                            pic_format="png",
-                        )
+                        # visualize_outputs(
+                        #     datasetType,
+                        #     model_tmp,
+                        #     val_dataloader,
+                        #     args,
+                        #     plot_path=args["destination"] / f"temp{epoch}",
+                        #     amount_datapoints_to_visu=1,
+                        #     pic_format="png",
+                        # )
 
                 # --- Visualization ---
                 if vis_interval is not None and epoch % vis_interval == 0:
@@ -296,32 +312,35 @@ class Solver:
                         plot_base = args["destination"] / f"train_best_e{epoch}"
                         plot_base = args["destination"] / f"train_best_e{epoch}"
                         if epoch == 0:
-                            visualize_inputs(
-                                train_dataloader,
-                                args,
-                                amount_datapoints_to_visu=1,
-                                plot_path=args["destination"] / f"train_temp{epoch}",
-                                pic_format="png",
-                            )
-                            visualize_outputs(
-                                best_model_tmp,
-                                train_dataloader,
-                                args,
-                                plot_path=plot_base,
-                                amount_datapoints_to_visu=1,
-                                pic_format="png",
-                                plot_true=True,
-                            )
+                            # visualize_inputs(
+                            #     train_dataloader,
+                            #     args,
+                            #     amount_datapoints_to_visu=1,
+                            #     plot_path=args["destination"] / f"train_temp{epoch}",
+                            #     pic_format="png",
+                            # )
+                            # visualize_outputs(
+                            #     best_model_tmp,
+                            #     train_dataloader,
+                            #     args,
+                            #     plot_path=plot_base,
+                            #     amount_datapoints_to_visu=1,
+                            #     pic_format="png",
+                            #     plot_true=True,
+                            # )
+                            visualize_inputs(datasetType, vis_dataloader_val, args, amount_datapoints_to_visu=1, plot_path=args["destination"] / f"val_temp{epoch}", pic_format="png")
+                            visualize_outputs(datasetType, best_model_tmp, vis_dataloader_val, args, plot_path=args["destination"] / f"val_e{epoch}", amount_datapoints_to_visu=1, pic_format="png")
                         else:
-                            visualize_outputs(
-                                best_model_tmp,
-                                train_dataloader,
-                                args,
-                                plot_path=plot_base,
-                                amount_datapoints_to_visu=1,
-                                pic_format="png",
-                                plot_true=False,
-                            )
+                            # visualize_outputs(
+                            #     best_model_tmp,
+                            #     train_dataloader,
+                            #     args,
+                            #     plot_path=plot_base,
+                            #     amount_datapoints_to_visu=1,
+                            #     pic_format="png",
+                            #     plot_true=False,
+                            # )
+                           visualize_outputs(datasetType, best_model_tmp, vis_dataloader_val, args, plot_path=args["destination"] / f"val_e{epoch}", amount_datapoints_to_visu=1, pic_format="png", plot_true=False)
 
         except KeyboardInterrupt:
             log.info("\nTraining interrupted by user.")
@@ -331,15 +350,15 @@ class Solver:
                     model_tmp.load_state_dict(self.best_model_params["state_dict"])
                     model_tmp.to(args["device"])
                     model_tmp.save(args["destination"], model_name=f"interim_model_e{epoch}.pt")
-                    visualize_outputs(
-                        datasetType,
-                        model_tmp,
-                        val_dataloader,
-                        args,
-                        plot_path=args["destination"] / f"plot_val_interim_e{epoch}",
-                        amount_datapoints_to_visu=2,
-                        pic_format="png",
-                    )
+                    # visualize_outputs(
+                    #     datasetType,
+                    #     model_tmp,
+                    #     val_dataloader,
+                    #     args,
+                    #     plot_path=args["destination"] / f"plot_val_interim_e{epoch}",
+                    #     amount_datapoints_to_visu=2,
+                    #     pic_format="png",
+                    # )
             except Exception as e:
                 logging.error(e)
             try:
@@ -467,49 +486,51 @@ class Solver:
             "SSIM": SSIMLoss().to(device),
         }
 
-        with torch.no_grad():
-            for case, dataloader in dataloaders.items():
-                norm = dataloader.dataset.norm
-                metrics[case] = {m: [] for m in ["Huber", "Linf", "MAE", "MSE", "PAT", "SSIM"]}
-                pat_loss = None
+        # with torch.no_grad():
+        #     for case, dataloader in dataloaders.items():
+        #         norm = dataloader.dataset.norm
+        #         metrics[case] = {m: [] for m in ["Huber", "Linf", "MAE", "MSE", "PAT", "SSIM"]}
+        #         pat_loss = None
 
-                for x, y in dataloader:
-                    x, y = x.to(device), y.to(device)
-                    y_pred = self.model(x)
+        #         for x, y, _ in dataloader:
+        #             x, y = x.to(device), y.to(device)
+        #             y_pred = self.model(x)
+        #             y_pred.squeeze_(1)
+        #             y.squeeze_(1)
 
-                    num_channels = y_pred.shape[1]
+        #             num_channels = y_pred.shape[1]
 
-                    if pat_loss is None:
-                        pat_loss = PATLoss(pat_thresholds=[0.1] * num_channels).to(device)
-                        loss_funcs["PAT"] = pat_loss
+        #             if pat_loss is None:
+        #                 pat_loss = PATLoss(pat_thresholds=[0.1] * num_channels).to(device)
+        #                 loss_funcs["PAT"] = pat_loss
 
-                    req_h, req_w = y_pred.shape[2:]
-                    h, w = y.shape[2:]
-                    sh, sw = (h - req_h) // 2, (w - req_w) // 2
-                    y_reduced = y[:, :, sh : sh + req_h, sw : sw + req_w]
+        #             req_h, req_w = y_pred.shape[2:]
+        #             h, w = y.shape[2:]
+        #             sh, sw = (h - req_h) // 2, (w - req_w) // 2
+        #             y_reduced = y[:, :, sh : sh + req_h, sw : sw + req_w]
 
-                    metrics[case]["SSIM"].append(1.0 - loss_funcs["SSIM"](y_pred, y_reduced).item())
+        #             metrics[case]["SSIM"].append(1.0 - loss_funcs["SSIM"](y_pred, y_reduced).item())
 
-                    for b in range(y_pred.shape[0]):
-                        norm.reverse(y_pred[b], data_type="Labels")
-                        norm.reverse(y_reduced[b], data_type="Labels")
+        #             for b in range(y_pred.shape[0]):
+        #                 norm.reverse(y_pred[b], data_type="Labels")
+        #                 norm.reverse(y_reduced[b], data_type="Labels")
 
-                    for m_name in ["Huber", "Linf", "MAE", "MSE"]:
-                        c_vals = [
-                            loss_funcs[m_name](y_pred[:, c : c + 1], y_reduced[:, c : c + 1]).item()
-                            for c in range(num_channels)
-                        ]
-                        metrics[case][m_name].append(c_vals)
+        #             for m_name in ["Huber", "Linf", "MAE", "MSE"]:
+        #                 c_vals = [
+        #                     loss_funcs[m_name](y_pred[:, c : c + 1], y_reduced[:, c : c + 1]).item()
+        #                     for c in range(num_channels)
+        #                 ]
+        #                 metrics[case][m_name].append(c_vals)
 
-                    metrics[case]["PAT"].append(loss_funcs["PAT"](y_pred, y_reduced).item())
+        #             metrics[case]["PAT"].append(loss_funcs["PAT"](y_pred, y_reduced).item())
 
-                for m_name in loss_funcs.keys():
-                    if metrics[case][m_name]:
-                        val_tensor = torch.tensor(metrics[case][m_name], dtype=torch.float32)
-                        metrics[case][m_name] = val_tensor.mean(dim=0).tolist()
+        #         for m_name in loss_funcs.keys():
+        #             if metrics[case][m_name]:
+        #                 val_tensor = torch.tensor(metrics[case][m_name], dtype=torch.float32)
+        #                 metrics[case][m_name] = val_tensor.mean(dim=0).tolist()
 
-        all_metrics["loss"] = metrics
-        save_yaml(all_metrics, destination / "measurements.yaml")
+        # all_metrics["loss"] = metrics
+        # save_yaml(all_metrics, destination / "measurements.yaml")
 
 
 def log_grad_stats(model, logger=logging):
