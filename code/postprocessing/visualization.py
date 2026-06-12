@@ -777,7 +777,7 @@ def visualize_outputs(
             init_frame = None
             for s_idx in sorted(chain_buffer[chain_idx].keys()):
                 x_s, y_s = chain_buffer[chain_idx][s_idx]
-                tiled = x_s.shape[-1] > 1000 or x_s.shape[-2] > 1000
+                tiled = x_s.shape[-1] > 500 or x_s.shape[-2] > 500
 
                 if is_sequential:
                     if tiled and hasattr(model, "infer_tiled"):

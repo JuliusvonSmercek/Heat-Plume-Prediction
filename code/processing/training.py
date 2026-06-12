@@ -101,12 +101,13 @@ def training(args: dict):
     dataloaders["train"] = construct_dataloader(args["batchsize"], datasets["train"], shuffle=True)
     dataloaders["val"] = construct_dataloader(args["batchsize"], datasets["val"], shuffle=False)
     dataloaders["test"] = construct_dataloader(args["batchsize"], datasets["test"], shuffle=False)
+    dataloaders["val_full_dp"] = construct_dataloader(args["batchsize"], datasets["val_full_dp"], shuffle=False)
 
     # visualize only inputs
     if args["visualize"]:
         visualize_inputs(
             datasetType,
-            dataloaders["val"],
+            dataloaders["val_full_dp"],
             args,
             plot_path=args["destination"] / "val",
             amount_datapoints_to_visu=1,
@@ -214,7 +215,7 @@ def training(args: dict):
     if args["case"] in ["train", "finetune"]:
         training_time = datetime.now()
         try:
-            val_loss = solver.train(datasetType, dataloaders["train"], dataloaders["val"], args)
+            val_loss = solver.train(datasetType, dataloaders["train"], dataloaders["val"], dataloaders["val_full_dp"], args)
         except KeyboardInterrupt:
             if solver.best_model_params is not None:
                 logging.warning(
@@ -250,7 +251,7 @@ def training(args: dict):
         visualize_outputs(
             datasetType,
             model,
-            dataloaders["val"],
+            dataloaders["val_full_dp"],
             args,
             plot_path=args["destination"] / "val",
             amount_datapoints_to_visu=1,

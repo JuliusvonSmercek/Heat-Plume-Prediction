@@ -126,17 +126,26 @@ def init_data(
         datasets["test"] = datasets["train"]
     else:
         if is_seq:
-            datasets["val"] = DataPointSequence(
+            datasets["val"] = SimulationDatasetCutsSequential(
                 args["data_prep"],
-                i=datapoint_validate,
-                time_steps_to_predict=time_steps_to_predict,
-                max_simulation_timestep=max_sim_ts,
+                time_steps_to_predict,
+                max_sim_ts,
+                skip_per_dir=args["skip_per_dir"],
+                box_size=args["len_box"],
+                ids=datapoint_validate,
+                log_path=args["destination"] / "training.log",
             )
-            datasets["test"] = DataPointSequence(
+            datasets["val_full_dp"] = DataPointSequence(
+                args["data_prep"], i=datapoint_validate, time_steps_to_predict=time_steps_to_predict
+            )
+            datasets["test"] = SimulationDatasetCutsSequential(
                 args["data_prep"],
-                i=datapoint_test,
-                time_steps_to_predict=time_steps_to_predict,
-                max_simulation_timestep=max_sim_ts,
+                time_steps_to_predict,
+                max_sim_ts,
+                skip_per_dir=args["skip_per_dir"],
+                box_size=args["len_box"],
+                ids=datapoint_test,
+                log_path=args["destination"] / "training.log",
             )
         else:
             datasets["val"] = DataPoint(args["data_prep"], i=datapoint_validate)

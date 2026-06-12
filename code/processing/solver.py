@@ -30,7 +30,7 @@ class Solver:
     train_dataset: Dataset
     val_dataset: Dataset
     loss_func: modules.loss._Loss = MSELoss()
-    batchsize: int = 32
+    batchsize: int = 8
     opt: Optimizer = AdamW
     optimizer_switch: bool = False
     finetune: bool = False
@@ -156,6 +156,7 @@ class Solver:
         datasetType: DatasetType,
         train_dataloader: DataLoader,
         val_dataloader: DataLoader,
+        val_dataloader_full_dp: DataLoader,
         args: dict,
     ):
         manual_seed(0)
@@ -221,14 +222,14 @@ class Solver:
         if True: #visualize:
             vis_dataloader = DataLoader(
                         train_dataloader.dataset,
-                        batch_size=train_dataloader.batch_size,
+                        batch_size=self.batchsize,
                         shuffle=False,
                         num_workers=0,
                         pin_memory=False,
                         drop_last=False)
             vis_dataloader_val = DataLoader(
-                val_dataloader.dataset,
-                batch_size=val_dataloader.batch_size,
+                val_dataloader_full_dp.dataset,
+                batch_size=self.batchsize,
                 shuffle=False,
                 num_workers=0,
                 pin_memory=False,
