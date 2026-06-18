@@ -163,12 +163,8 @@ def init_data(args:dict, datapoint_test: int, datapoint_validate: int, datapoint
       datasets["train"] = dataset_train
       datasets["val"] = dataset_train
       datasets["test"] = dataset_train
-      
-    print(f"Length dataset_train class: {len(datasets['train'])}")
-    print(f"Length dataset_val class: {len(datasets['val'])}")
 
     dataset_train_meta = datasets["train"].dataset if hasattr(datasets["train"], "dataset") else datasets["train"]
-    log.info("datasets['train']: ", datasets["train"].__class__.__name__)
     return dataset_train_meta.input_channels, dataset_train_meta.output_channels, datasets
 
 def custom_collate_with_metadata(batch):
@@ -191,7 +187,6 @@ def custom_collate_with_metadata(batch):
         return default_collate(batch)
 
 def construct_dataloader(batch_size: int, dataset: DatasetBasis, shuffle=True) -> DataLoader:
-    print(f"Daset class: {dataset.__class__.__name__}")
     if dataset.__class__.__name__ in ["SimulationDatasetCutsSequential"]:
         sampler = ChainedSubsetBatchSampler(
             n_chains=len(dataset.chains),

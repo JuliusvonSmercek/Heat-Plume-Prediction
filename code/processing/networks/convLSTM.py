@@ -26,7 +26,6 @@ class ConvLSTMCell(nn.Module):
 
         super(ConvLSTMCell, self).__init__()  
 
-        print(f"ConvLSTMCell init: in_channels={in_channels}, out_channels={out_channels}, ")
         if activation == "tanh":
             self.activation = torch.tanh 
         elif activation == "relu":

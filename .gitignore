@@ -1,22 +1,9 @@
 # private stuff
-archiv/
 .vscode/
 .venv
-/contract
-todo.md
-command_line_arguments.yaml
-command_line_arguments_generated.yaml
-info.yaml
-/Heat-Plume-Prediction/step2-results/normal.yaml
-/Heat-Plume-Prediction/step2-results/probabilistic-velocity.yaml
-/Heat-Plume-Prediction/step2-results/probabilistic-position.yaml
-/Heat-Plume-Prediction/step2-results/probabilistic-velocity-gpu.yaml
-case-quick-test.yaml
-
-
-/Heat-Plume-Prediction/datasets_prep
-/Heat-Plume-Prediction/datasets
-/Heat-Plume-Prediction/models
+/datasets
+/datasets_prep
+/results
 
 # Latex
 *.log
@@ -43,7 +30,6 @@ bericht.pdf
 # other stuff
 .svn
 .directory
-
 
 paths.yaml
 paths_sdf.yaml
@@ -84,9 +70,6 @@ cuda-repo-ubuntu2204-12-0-local_12.0.0-525.60.13-1_amd64.deb
 *.h5
 *.jpg
 *.jpeg
-
-!schwankung_parameter.jpg
-!sensitivitaet.jpg
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -235,6 +218,3 @@ finetune_step3.sh
 
 # NFS
 .nfs*
-
-# Backlog
-Heat-Plume-Prediction/Backlog.md

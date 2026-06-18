@@ -16,10 +16,10 @@ source ~/venvs/LGCNN/bin/activate
 echo "Activated LGCNN virtual environment"
 cd Heat-Plume-Prediction/code
 
-#git checkout 588f9f70a8ce8d827cb9e1aec5168157133ebb5f
+#git checkout b07aa2b97ae0ba8680425fe39ee199253eb44cce
 
 # Run the Python script in the background, redirecting output to log
-nohup env CUDA_VISIBLE_DEVICES=1 python main.py '/data/scratch/hofmanja/Heat-Plume-Data/runs/STEP3/RNN_overfit_timesteps_1_2lay_2dp/overfit.yaml' > "$LOGFILE" 2>&1 &
+nohup env CUDA_VISIBLE_DEVICES=2 python main.py '/data/scratch/hofmanja/Heat-Plume-Data/runs/trained_models/ik/config.yaml' > "$LOGFILE" 2>&1 &
 #bash vampireman.sh > "$LOGFILE" 2>&1 &
 
 
@@ -27,5 +27,7 @@ nohup env CUDA_VISIBLE_DEVICES=1 python main.py '/data/scratch/hofmanja/Heat-Plu
 #echo "Job started on GPU $CUDA_VISIBLE_DEVICES"
 echo "Logging to $LOGFILE"
 echo "Use 'tail -f $LOGFILE' to monitor progress"
+
+echo "New version"
 
 #git checkout main

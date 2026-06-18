@@ -93,9 +93,7 @@ def training(args: Dict):
             else:
                 extend = len(time_steps_to_predict)
 
-            log.info(f"Extend: {extend}")
             len_box = args["len_box"]
-            print(f"Input_channels before net construction: {input_channels}")
             model = Seq2Seq(input_channels+2,
                             frame_size=[len_box, len_box],
                             prev_boxes=0,

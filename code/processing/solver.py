@@ -183,7 +183,7 @@ class Solver(object):
           early_stop_patience = scheduler_config.early_stop_patience
         else:
           raise ValueError(f"Unknown scheduler type: {scheduler_config.type}")
-        print(f"Early stopping patience set to {early_stop_patience} epochs.")
+
         early_stop_counter = 0
         min_delta = 1e-7
         
@@ -460,7 +460,7 @@ class Solver(object):
                         if cache_key in sublist_predictions_cache:
                             prev_pred = torch.sigmoid(sublist_predictions_cache[cache_key].to(device))
                             init_frame[batch_i, 0] = prev_pred[0, -1]
-                        else:
+                        elif (subset_idx -1) > 0:
                             logging.warning(f"Cache miss for chain {chain_id}, subset {subset_idx -1 }. Using zeros for init_frame.")
     
             processed_batches += 1
