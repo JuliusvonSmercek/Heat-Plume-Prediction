@@ -48,6 +48,7 @@ This branch serves soley the execution of Step3 with a Convolutional LSTM Networ
 ### Setup
 general setup:
 ```sh
+module load python/3.12.9
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -56,12 +57,14 @@ pip install -r requirements.txt
 ### Dataset Setup
 download datasets automatically (hint: when the darus is still private create a file `.darus_apikey` with the api-key of darus)
 ```sh
-pip install -r darus_data_download/requirements.txt
-python darus_data_download/scripts/get_data.py
-mv data/student-thesis-on-transient-adaptation-of-lgcnn/datasets/ datasets/
-mv data/student-thesis-on-transient-adaptation-of-lgcnn/probabilistic-lgcnn/results/ results/
-mv data/student-thesis-on-transient-adaptation-of-lgcnn/sequence_prediction/datasets_prepared/ datasets_prep/
-mv data/student-thesis-on-transient-adaptation-of-lgcnn/sequence_prediction/trained_models/ results/
+git submodule update --init --recursive --force
+cd darus_data_download
+pip install -r requirements.txt
+python scripts/get_data.py
+mv scripts/data/student-thesis-on-transient-adaptation-of-lgcnn/datasets/ ../datasets/
+mv scripts/data/student-thesis-on-transient-adaptation-of-lgcnn/probabilistic-lgcnn/results/ ../results/
+mv scripts/data/student-thesis-on-transient-adaptation-of-lgcnn/sequence_prediction/datasets_prepared/ ../datasets_prep/
+mv scripts/data/student-thesis-on-transient-adaptation-of-lgcnn/sequence_prediction/trained_models/ ../results/
 ```
 
 Adjust the paths in the `config.yaml` to your dataset and model destination.
@@ -71,7 +74,8 @@ For training a new model set `run_configuration.pipeline.step3` to `train`.
 
 Run:
 ```bash
-python main.py [config.yaml]
+python code/main.py settings/config_ik.yaml
+python code/main.py settings/config_iks.yaml
 ```
 
 
