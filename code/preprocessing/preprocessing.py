@@ -5,7 +5,6 @@ import h5py
 import torch
 from tqdm import tqdm
 from pathlib import Path
-import lic
 
 from preprocessing.transforms import get_transforms, normalize, ToTensorTransform
 from utils.utils_args import is_empty, load_yaml, save_yaml, load_time_steps, load_time_steps_full_str

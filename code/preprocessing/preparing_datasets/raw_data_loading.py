@@ -2,7 +2,6 @@ import h5py
 import numpy as np
 import torch
 from pathlib import Path
-import lic
 from scipy.ndimage import median_filter, gaussian_filter
 import utils.logging as log
 
@@ -21,15 +20,6 @@ def load_raw_data(data_path: Path, time: str, variables: dict, dimensions_of_dat
             try:
                 if "velocity" in key.lower():
                     data[key] = torch.tensor(fct_reshape(np.array(file[time_prediction][key]))).float()
-                elif key == "Line Integral Convolution":
-                    # Add line integral convolution
-                    v_x = data["Liquid X-Velocity [m_per_y]"].squeeze(-1).numpy()
-                    v_y = data["Liquid Y-Velocity [m_per_y]"].squeeze(-1).numpy()
-                    lic_result = lic.lic(v_y, v_x, length=30) # x and y are flipped for consistency
-                    # Apply contrast enhancement manually
-                    lic_result = (lic_result - lic_result.min()) / (lic_result.max() - lic_result.min())
-                    lic_result = gaussian_filter(lic_result, sigma=0.75)
-                    data["Line Integral Convolution"] = torch.from_numpy(lic_result).float()
                 else:
                     data[key] = torch.tensor(fct_reshape(np.array(file[time][key]))).float()
                     if key == "Material ID":
