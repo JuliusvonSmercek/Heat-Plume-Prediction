@@ -7,19 +7,20 @@
 export PYTORCH_NO_TELEMETRY=1
 
 # Name of log file
-LOGDIR="/home/hofmanja/HeatPlumes/logs"
-LOGFILE="$LOGDIR/2timesteps_3lay_2dp$(date +%Y%m%d_%H%M%S).log"
+LOGDIR="/home/hofmanja/logs"
+LOGFILE="$LOGDIR/infered_velocity$(date +%Y%m%d_%H%M%S).log"
 
 
 # prepare environment
-source ~/venvs/LGCNN/bin/activate
-echo "Activated LGCNN virtual environment"
-cd Heat-Plume-Prediction/code
+module load python/3.12.9
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 
 #git checkout b07aa2b97ae0ba8680425fe39ee199253eb44cce
 
 # Run the Python script in the background, redirecting output to log
-nohup env CUDA_VISIBLE_DEVICES=2 python main.py '/data/scratch/hofmanja/Heat-Plume-Data/runs/trained_models/ik/config.yaml' > "$LOGFILE" 2>&1 &
+nohup env CUDA_VISIBLE_DEVICES=2 python main.py '/data/scratch/hofmanja/Heat-Plume-Data/runs/infered_velocity/config.yaml' > "$LOGFILE" 2>&1 &
 #bash vampireman.sh > "$LOGFILE" 2>&1 &
 
 

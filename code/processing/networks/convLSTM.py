@@ -241,8 +241,16 @@ class Seq2Seq(nn.Module):
     
         super(Seq2Seq, self).__init__()
 
-        self.static_channels = 2 # TODO change to 2 (w\o streamlines or 5 w\ streamlines)
+        match in_channels:
+            case 4:
+                self.static_channels = 2
+            case 7:
+                self.static_channels = 5
+            case _:
+                raise ValueError(f"Unsupported in_channels: {in_channels}. Expected 4 or 7. This branch is only for inputs 'ik' or 'iks'/'ik157'")
+            
         self.dynamic_channels = in_channels - self.static_channels
+        print(f"[Seq2Seq] static_channels: {self.static_channels}, dynamic_channels: {self.dynamic_channels}")
         self.film_channels = enc_conv_features[-1]
         
         self.sequential = nn.Sequential()
@@ -371,7 +379,8 @@ class Seq2Seq(nn.Module):
         hidden_C = [self.initial_C_projections[i](init_frame) for i in range(self.num_layers)]
         
         # --- Static encoder (runs once) ---
-        static_input = X[:, :2, 0]          # TODO change to 2 w\o streamlines or 5 w\ streamlines
+        
+        static_input = X[:, :self.static_channels, 0] 
         static_feat = self.static_encoder(static_input)  # (B, static_features, H, W)
             
         T = X.shape[2]
@@ -381,7 +390,7 @@ class Seq2Seq(nn.Module):
         # Replace X with static features for the recurrent input
         x_in = static_expanded  # ConvLSTM now receives this instead of X
         
-        scalars = X[:, 2:, :, 0, 0]     # TODO change to 2 (w\o streamlines or 5 w\ streamlines)
+        scalars = X[:, self.static_channels:, :, 0, 0]
         
         X = x_in
         for i in range(self.num_layers):

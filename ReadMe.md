@@ -61,13 +61,15 @@ git submodule update --init --recursive --force
 cd darus_data_download
 pip install -r requirements.txt
 python scripts/get_data.py
+mv "scripts/data/student-thesis-on-transient-adaptation-of-lgcnn/sequence_prediction/datasets_prepared/inputs_iks_outputs_t" \
+   "scripts/data/student-thesis-on-transient-adaptation-of-lgcnn/sequence_prediction/datasets_prepared/paper-results-seasonal/inputs_ik157_outputs_t" #important: */paper-results-seasonal/* and "157" instead of "s"
 mv scripts/data/student-thesis-on-transient-adaptation-of-lgcnn/datasets/ ../datasets/
 mv scripts/data/student-thesis-on-transient-adaptation-of-lgcnn/probabilistic-lgcnn/results/ ../results/
-mv scripts/data/student-thesis-on-transient-adaptation-of-lgcnn/sequence_prediction/datasets_prepared/ ../datasets_prep/
+mv scripts/data/student-thesis-on-transient-adaptation-of-lgcnn/sequence_prediction/datasets_prepared/ ../datasets_prep/paper-results-seasonal
 mv scripts/data/student-thesis-on-transient-adaptation-of-lgcnn/sequence_prediction/trained_models/ ../results/
 ```
 
-Adjust the paths in the `config.yaml` to your dataset and model destination.
+Adjust the paths in the `config_*.yaml` to your dataset and model destination.
 
 ## Run and Training
 For training a new model set `run_configuration.pipeline.step3` to `train`.

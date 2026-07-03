@@ -9,15 +9,7 @@ general_configuration:
       - 0
     general:
       epochs: 20
-      model_path: !!python/object/apply:pathlib.PosixPath
-      - /
-      - data
-      - scratch
-      - hofmanja
-      - Heat-Plume-Data
-      - datasets_prepared
-      - paper-results-1dp-conv
-      - inputs_pki_outputs_xy
+      model_path: /
       visualize: true
       visualize_interval: 500
     hopt_parameters:

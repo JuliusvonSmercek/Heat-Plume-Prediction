@@ -18,6 +18,5 @@ jupyterlab-optuna
 joblib
 cuda-python
 pydantic
-lic
 pynacl
 requests
