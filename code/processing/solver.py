@@ -3,7 +3,12 @@ import logging
 import time
 from code.postprocessing.visualization import visualize_outputs
 from code.preprocessing.datasets.dataset import DatasetType
-from code.processing.loss_fcts import LinfLoss, PATLoss, SSIMLoss
+from code.processing.loss_fcts import (
+    CHANNELWISE_EVAL_NAMES,
+    EVAL_METRIC_NAMES,
+    get_eval_metrics,
+    make_pat_loss,
+)
 from code.processing.networks.convLSTM import Seq2Seq
 from code.processing.networks.convLSTM import weights_init as convlstm_weights_init
 from code.processing.networks.model import weights_init as model_weights_init
@@ -15,12 +20,33 @@ from pathlib import Path
 
 import torch
 from torch import manual_seed
-from torch.nn import HuberLoss, L1Loss, Module, MSELoss, modules
-from torch.optim import AdamW, Optimizer
+from torch.nn import HuberLoss, Module, modules
+from torch.optim import SGD, Adam, AdamW, Optimizer
 from torch.optim.lr_scheduler import ReduceLROnPlateau, StepLR
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
+
+# Optimizer L2 regularization (not YAML-configurable).
+DEFAULT_WEIGHT_DECAY: float = 1e-4
+EARLY_STOP_MIN_DELTA: float = 1e-6
+EARLY_STOP_PATIENCE_MULTIPLIER: int = 2
+
+_OPTIMIZERS: dict[str, type[Optimizer]] = {
+    "adam": Adam,
+    "adamw": AdamW,
+    "sgd": SGD,
+}
+
+
+def resolve_optimizer(name: str | type[Optimizer]) -> type[Optimizer]:
+    """Map YAML ``optimizer`` string (or class) to a ``torch.optim`` class."""
+    if isinstance(name, type):
+        return name
+    key = str(name).strip().lower()
+    if key not in _OPTIMIZERS:
+        raise ValueError(f"Unknown optimizer '{name}'. Choose from: {sorted(_OPTIMIZERS)}")
+    return _OPTIMIZERS[key]
 
 
 @dataclass
@@ -28,12 +54,9 @@ class Solver:
     model: Module
     train_dataset: Dataset
     val_dataset: Dataset
-    loss_func: modules.loss._Loss = MSELoss()
-    batchsize: int = 32
-    opt: Optimizer = AdamW
-    finetune: bool = False
-    best_model_params: dict = None
-    metrics: dict = None
+    loss_func: modules.loss._Loss
+    finetune: bool
+    best_model_params: dict | None = None
 
     def __post_init__(self):
         # UNet.__init__ applies kaiming first; overwrite with the trained recipe
@@ -69,7 +92,11 @@ class Solver:
 
         # Assume noisy data
         scheduler = args["scheduler"]
-        self.opt = self.opt(self.model.parameters(), scheduler.init_lr, weight_decay=1e-4)
+        optimizer_cls = resolve_optimizer(args["optimizer"])
+        self.opt = optimizer_cls(
+            self.model.parameters(), lr=scheduler.init_lr, weight_decay=DEFAULT_WEIGHT_DECAY
+        )
+        log.info(f"Optimizer: {optimizer_cls.__name__} (weight_decay={DEFAULT_WEIGHT_DECAY})")
 
         if scheduler.type == "ReduceLROnPlateau":
             scheduler = ReduceLROnPlateau(
@@ -85,9 +112,8 @@ class Solver:
         else:
             raise ValueError(f"Unknown scheduler type: {args['scheduler'].type}")
 
-        early_stop_patience = scheduler.patience * 2
+        early_stop_patience = scheduler.patience * EARLY_STOP_PATIENCE_MULTIPLIER
         early_stop_counter = 0
-        min_delta = 1e-6
 
         try:
             for epoch in epochs:
@@ -116,11 +142,12 @@ class Solver:
                 )
 
                 # Keep best model
-                if self.best_model_params is None or val_epoch_loss < (self.best_model_params["loss"] - min_delta):
+                if self.best_model_params is None or val_epoch_loss < (self.best_model_params["loss"] - EARLY_STOP_MIN_DELTA):
                     self.best_model_params = {
                         "epoch": epoch,
                         "loss": val_epoch_loss,
                         "train loss": train_epoch_loss,
+                        "val_loss": val_epoch_loss,
                         "state_dict": self.model.state_dict(),
                         "optimizer": self.opt.state_dict(),
                         "training time in sec": (time.perf_counter() - start_time),
@@ -135,7 +162,7 @@ class Solver:
                             f"\nEarly stopping triggered! No improvement in validation loss for {early_stop_patience} consecutive epochs."
                         )
                         break
-                if self.best_model_params is not None:
+                if self.best_model_params is not None and args["visualize_epochs"]:
                     with torch.no_grad():
                         model_tmp = deepcopy(self.model)
                         visualize_outputs(
@@ -237,18 +264,12 @@ class Solver:
     def save_metrics_separate_yaml(self, dataloaders: dict, destination: Path, device: str, all_metrics: dict):
         metrics = {}
         self.model.eval()
-        loss_funcs = {
-            "Huber": HuberLoss().to(device),
-            "Linf": LinfLoss().to(device),
-            "MAE": L1Loss().to(device),
-            "MSE": MSELoss().to(device),
-            "SSIM": SSIMLoss().to(device),
-        }
+        loss_funcs = get_eval_metrics(device)
 
         with torch.no_grad():
             for case, dataloader in dataloaders.items():
                 norm = dataloader.dataset.norm
-                metrics[case] = {m: [] for m in ["Huber", "Linf", "MAE", "MSE", "PAT", "SSIM"]}
+                metrics[case] = {m: [] for m in EVAL_METRIC_NAMES}
                 pat_loss = None
 
                 for x, y in dataloader:
@@ -258,7 +279,7 @@ class Solver:
                     num_channels = y_pred.shape[1]
 
                     if pat_loss is None:
-                        pat_loss = PATLoss(pat_thresholds=[0.1] * num_channels).to(device)
+                        pat_loss = make_pat_loss(num_channels, device)
                         loss_funcs["PAT"] = pat_loss
 
                     req_h, req_w = y_pred.shape[2:]
@@ -272,7 +293,7 @@ class Solver:
                         norm.reverse(y_pred[b], data_type="Labels")
                         norm.reverse(y_reduced[b], data_type="Labels")
 
-                    for m_name in ["Huber", "Linf", "MAE", "MSE"]:
+                    for m_name in CHANNELWISE_EVAL_NAMES:
                         c_vals = [
                             loss_funcs[m_name](y_pred[:, c : c + 1], y_reduced[:, c : c + 1]).item()
                             for c in range(num_channels)

@@ -1,29 +1,33 @@
+# Minimal steady-state smoke config (1 epoch, 2 RUNs, tiny streamlines).
+# Prep expects tests/heatplume_steady_smoke/datasets/dataset_giant_100hp_varyK
+# with RUN_1, RUN_2 (+ inputs/) — created by the unittest helper.
+# Full step2/3 on this 2560^2 / 100-HP dataset needs CUDA; the unittest runs step1-only on CPU.
 run_configuration:
-  run_name: steady-state
+  run_name: steady_smoke
   dataset: dataset_giant_100hp_varyK
   seed: 2406
-  device: cuda:3
+  device: cpu
   use_velocity_model: false
 
   pipeline:
-    # - clean: data_prep
+    - clean: data_prep
     - clean: results-step1
-    - step1: train
     - clean: results-step2
+    - step1: train
     - step2: run
-    # - clean: results-step3
-    # - step3: train
+    - clean: results-step3
+    - step3: train
 
 general_configuration:
   step1:
     datapoints:
-      validation: [0]
+      train: [0]
+      validation: [1]
       test: [1]
-      train: [2]
     general:
       epochs: 1
-      visualize: true
-      visualize_epochs: true
+      visualize: false
+      visualize_epochs: false
     scheduler:
       type: ReduceLROnPlateau
       init_lr: 1e-4
@@ -36,10 +40,10 @@ general_configuration:
       network: unet
       inputs: [p, k, i]
       outputs: [x, y]
-      batchsize: 20
+      batchsize: 1
       kernel_size: 5
-      depth: 4
-      init_features: 32
+      depth: 2
+      init_features: 8
       stride: 1
       dilation: 1
       norm: batchnorm
@@ -47,15 +51,15 @@ general_configuration:
       skip_per_dir: 16
       len_box: 256
       train_loss: MSE
-      bool_cutouts: true
+      bool_cutouts: false
       optimizer_switch: false
-      optimizer: AdamW
-      activation: LeakyReLU
+      optimizer: Adam
+      activation: ReLU
 
   step2:
     rwpt:
-      samples: 200000
-      steps: 10000
+      samples: 8
+      steps: 4
     physical_parameters:
       resolution_m: 5.0
       duration_years: 27.5
@@ -66,9 +70,9 @@ general_configuration:
       water_specific_heat_J_per_kgK: 4180.0
       thermal_conductivity_dry_W_per_mK: 0.65
       thermal_conductivity_wet_W_per_mK: 1.0
-      thickness_aquifer_m: 5.0
-      longitudinal_dispersivity_m: 5.0
-      transverse_dispersivity_h_m: 0.5
+      thickness_aquifer_m: 1.0
+      longitudinal_dispersivity_m: 1.0
+      transverse_dispersivity_h_m: 0.1
       ambient_temperature_C: 10.6
       temperature_spread_C: 5.0
       injection_temperature_C:
@@ -86,11 +90,11 @@ general_configuration:
     datapoints:
       train: [0]
       validation: [1]
-      test: [2]
+      test: [1]
     general:
-      epochs: 300
-      visualize: true
-      visualize_epochs: true
+      epochs: 1
+      visualize: false
+      visualize_epochs: false
     scheduler:
       type: ReduceLROnPlateau
       init_lr: 1e-3
@@ -103,23 +107,23 @@ general_configuration:
       network: unet
       inputs: [p, k, i, x, y, 7]
       outputs: [t]
-      batchsize: 20
+      batchsize: 1
       kernel_size: 3
-      depth: 3
-      init_features: 64
+      depth: 2
+      init_features: 8
       stride: 1
       dilation: 1
-      norm: batchnorm # instancenorm, groupnorm
+      norm: batchnorm
       repeat_inner: false
       skip_per_dir: 8
       len_box: 256
       train_loss: Huber
-      bool_cutouts: true
+      bool_cutouts: false
       optimizer_switch: false
       optimizer: AdamW
       activation: LeakyReLU
 
 paths:
-  datasets_raw: ../../temp/datasets
-  datasets_prep: ./datasets_prep
-  results: ./results
+  datasets_raw: ./tests/heatplume_steady_smoke/datasets
+  datasets_prep: ./tests/heatplume_steady_smoke/datasets_prep
+  results: ./tests/heatplume_steady_smoke/results

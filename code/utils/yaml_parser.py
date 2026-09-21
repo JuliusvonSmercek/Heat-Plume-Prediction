@@ -1,4 +1,5 @@
 from code.utils import logging as log  # noqa: F401
+from code.utils.yaml_includes import load_yaml_with_includes
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypeVar
 
@@ -34,6 +35,7 @@ class GeneralSettings(BaseModel):
 
     epochs: int
     visualize: bool
+    visualize_epochs: bool
 
 
 class ReduceLROnPlateauConfig(BaseModel):
@@ -98,6 +100,7 @@ ModelConfig = Annotated[UNetParameters | RNNParameters, Field(discriminator="net
 class HoptParameters(BaseModel):
     """Optuna search space: list-valued mirrors of ``UNetParameters`` scalar fields."""
 
+    n_trials: int = 100
     network: list[str]
     inputs: list[list[CoercedString]]
     outputs: list[list[CoercedString]]
@@ -126,15 +129,6 @@ class MLStepConfig(BaseModel):
     scheduler: SchedulerConfig
     model_parameters: ModelConfig
     hopt_parameters: HoptParameters | None = None
-
-
-class Streamlines(BaseModel):
-    """Streamline simulation parameters."""
-
-    samples: int
-    steps: int
-    diffusion_scale: float
-    diffusion_base: float
 
 
 class Rwpt(BaseModel):
@@ -175,7 +169,6 @@ class PhysicalParameters(BaseModel):
 class SimulationStepConfig(BaseModel):
     """Configuration for physics simulation step."""
 
-    streamlines: Streamlines
     rwpt: Rwpt
     physical_parameters: PhysicalParameters
 
@@ -217,11 +210,13 @@ class AppConfig(BaseModel):
 
 # --- Logic & Parsers ---
 def load_config[T: BaseModel](yaml_path: str | Path, model_cls: type[T]) -> T:
-    """Generic loader for YAML to Pydantic models."""
+    """Generic loader for YAML to Pydantic models (with include resolution)."""
     try:
-        with open(yaml_path) as f:
-            return model_cls(**yaml.safe_load(f))
-    except (ValidationError, FileNotFoundError, yaml.YAMLError) as e:
+        data = load_yaml_with_includes(yaml_path)
+        if not isinstance(data, dict):
+            raise ValueError(f"Root of {yaml_path} must be a mapping, got {type(data).__name__}")
+        return model_cls(**data)
+    except (ValidationError, FileNotFoundError, yaml.YAMLError, ValueError) as e:
         raise ValueError(f"Failed to load {model_cls.__name__} from {yaml_path}: {e}") from e
 
 

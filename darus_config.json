@@ -8,6 +8,10 @@
     {
       "id": "doi:10.18419/darus-4156",
       "version": ":latest"
+    },
+    {
+      "id": "doi:10.18419/DARUS-5808",
+      "version": ":latest"
     }
   ]
 }

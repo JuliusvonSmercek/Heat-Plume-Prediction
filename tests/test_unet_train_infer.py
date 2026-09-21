@@ -36,7 +36,7 @@ class TestUnetTrainInfer(unittest.TestCase):
         loader = DataLoader(ds, batch_size=batch, shuffle=False, drop_last=False, num_workers=0)
 
         model = UNet(cin, cout, init_features=8, depth=depth, kernel_size=3, norm="batchnorm").float().to(device)
-        solver = Solver(model, ds, ds, loss_func=MSELoss(), batchsize=batch, finetune=False)
+        solver = Solver(model, ds, ds, loss_func=MSELoss(), finetune=False)
 
         dest = SMOKE_UNET_OUT
         dest.mkdir(parents=True, exist_ok=True)
@@ -44,6 +44,8 @@ class TestUnetTrainInfer(unittest.TestCase):
             "destination": dest,
             "device": device,
             "epochs": 1,
+            "optimizer": "AdamW",
+            "visualize_epochs": False,
             "scheduler": SimpleNamespace(
                 type="ReduceLROnPlateau",
                 init_lr=1e-3,

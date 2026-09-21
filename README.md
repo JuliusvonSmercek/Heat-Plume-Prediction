@@ -15,20 +15,14 @@ A U-Net predicts the heterogeneous groundwater velocity field $\mathbf{v}(\mathb
 - outputs: X-velocity, Y-velocity
 
 ### 2. Global Streamline Computation
-Physics-based stochastic streamlines plus an RWPT thermal prior (not a full PFLOTRAN run). The injection rate in the RWPT solver is scaled by `0.25` to align with PFLOTRAN ground truth.
+RWPT thermal prior (not a full PFLOTRAN run). The injection rate in the RWPT solver is scaled by `0.25` to align with PFLOTRAN ground truth.
 
 | Channel | Name | Description |
 |---------|------|-------------|
-| `1` | Sum Position | Accumulated streamline density |
-| `2` | Relative Uncertainty | Std/mean of ensemble |
-| `3` | Time-Faded Position | Temporal decay weighting |
-| `4` | Max Time-Faded | Peak influence over time |
-| `5` | Seasonal Position | Multi-season aggregation |
-| `6` | Max Seasonal | Peak seasonal influence |
 | `7` | RWPT | GPU-computed thermal plume |
 
 - inputs: X-velocity, Y-velocity, heat-pump positions
-- outputs: 7 tensors
+- outputs: 1 tensor (channel `7`)
 
 ### 3. Temperature Regression
 A second CNN maps physical priors (and selected raw channels) to $T(\mathbf{x})$.
@@ -104,7 +98,7 @@ general_configuration:
   step3:
     model_parameters:
       network: unet
-      inputs: [p, k, i, x, y, 1, 2, 3, 5, 7]  # 1-7 = streamline / RWPT priors
+      inputs: [p, k, i, x, y, 7]  # 7 = RWPT thermal prior
       outputs: [t]
 ```
 

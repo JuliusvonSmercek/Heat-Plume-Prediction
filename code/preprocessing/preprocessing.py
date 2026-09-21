@@ -4,6 +4,7 @@ from code.preprocessing.transforms import ToTensorTransform, get_transforms, nor
 from code.utils import logging as log  # noqa: F401
 from code.utils.utils_args import is_empty, load_time_steps, load_yaml, save_yaml
 from pathlib import Path
+import re
 
 import h5py
 import numpy as np
@@ -38,12 +39,26 @@ def is_unprepared(path: Path):
 
 
 def get_time_prediction(data_path):
-    """Return the HDF5 time group for the final prediction snapshot (27.5 years)."""
+    """Return the HDF5 time group for the final prediction snapshot.
+
+    Supports legacy PFLOTRAN dumps (e.g. 27.5 y) and DaRUS-converted runs (e.g. 10 y)
+    by selecting the group with the largest parsed time, ignoring t=0.
+    """
+    time_re = re.compile(r"Time\s+([0-9.]+E[+-]?[0-9]+)\s+y", re.IGNORECASE)
+    best_key = None
+    best_years = -1.0
     with h5py.File(data_path, "r") as file:
         for item in file.keys():
-            if "2.75000E+01" in item:
-                return item
-    raise ValueError("Could not find time prediction (27.5y) in h5 file")
+            match = time_re.search(item)
+            if not match:
+                continue
+            years = float(match.group(1))
+            if years > best_years:
+                best_years = years
+                best_key = item
+    if best_key is None or best_years <= 0.0:
+        raise ValueError(f"Could not find a non-zero prediction time group in {data_path}")
+    return best_key
 
 
 def prepare_dataset(args: dict, info: dict = None):
@@ -258,7 +273,9 @@ def prepare_dataset_for_sequence(args: dict, info: dict = None):
 def expand_property_names(properties: str):
     translation = {
         "x": "Liquid X-Velocity [m_per_y]",
+        "s": "Liquid X-Velocity NoHP [m_per_y]",
         "y": "Liquid Y-Velocity [m_per_y]",
+        "a": "Liquid Y-Velocity NoHP [m_per_y]",
         "z": "Liquid Z-Velocity [m_per_y]",
         "p": "Liquid Pressure [Pa]",
         "k": "Permeability X [m^2]",
@@ -268,12 +285,6 @@ def expand_property_names(properties: str):
         "l": "Line Integral Convolution",
         "d": "Streamlines Faded [-]",
         "c": "Streamlines Faded Outer [-]",
-        "1": "Streamline-Sum_Position",
-        "2": "Streamline-Sum_RelativeUncertainty",
-        "3": "Streamline-Sum_TimeFaded-Position",
-        "4": "Streamline-Max_TimeFaded",
-        "5": "Streamline-Sum_TimeSeasons-Position",
-        "6": "Streamline-Max_TimeSeasons",
         "7": "Streamline-TemperatureApproximation",
     }
     possible_vars = ",".join(translation.keys())

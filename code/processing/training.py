@@ -5,7 +5,7 @@ from code.postprocessing.visualization import visualize_inputs, visualize_output
 from code.preprocessing.data_init import construct_dataloader, init_data
 from code.preprocessing.datasets.dataset import DatasetType
 from code.preprocessing.preprocessing import preprocessing
-from code.processing.loss_fcts import CombiLoss
+from code.processing.loss_fcts import get_train_loss
 from code.processing.networks.convLSTM import Seq2Seq
 from code.processing.networks.unetVariants import UNet, UNetNoPad2
 from code.processing.solver import Solver
@@ -20,18 +20,17 @@ from datetime import datetime
 from pathlib import Path
 
 import torch
-from torch.nn import HuberLoss, L1Loss, MSELoss
 
 
-def get_dataset_type(info: dict) -> str:
+def get_dataset_type(info: dict, ambient_temperature_C: float) -> DatasetType:
     datasetType = None
     temp_label = info.get("Labels", {}).get("Temperature [C]")
 
     if temp_label is None:
         datasetType = DatasetType.unknown
-    elif 10.6 <= temp_label["min"]:
+    elif ambient_temperature_C <= temp_label["min"]:
         datasetType = DatasetType.steady_state_heating
-    elif temp_label["max"] <= 10.6:
+    elif temp_label["max"] <= ambient_temperature_C:
         datasetType = DatasetType.steady_state_cooling
     else:
         datasetType = DatasetType.seasonal
@@ -43,7 +42,7 @@ def training(args: dict):
 
     args["data_prep"] = get_data_prep_path(args["data_prep"], args["inputs"], args["outputs"], args["data_raw"])
     info = preprocessing(args)  # and save info.yaml in model folder
-    datasetType = get_dataset_type(info)
+    datasetType = get_dataset_type(info, args["ambient_temperature_C"])
 
     input_channels, output_channels, datasets = init_data(
         args,
@@ -136,14 +135,13 @@ def training(args: dict):
     is_pretrained = args["case"] in ["finetune", "test"]
     val_loss = 9e9
     if args["case"] in ["train", "finetune"]:
-        loss = select_loss_function(args)
+        loss = get_train_loss(args["train_loss"])
         solver = Solver(
             model,
             datasets["train"],
             datasets["val"],
             loss_func=loss,
             finetune=is_pretrained,
-            batchsize=args["batchsize"],
         )
         training_time = datetime.now()
         try:
@@ -175,14 +173,13 @@ def training(args: dict):
         )
     elif args["case"] == "test":
         model.eval()
-        loss = select_loss_function(args)
+        loss = get_train_loss(args["train_loss"])
         solver = Solver(
             model,
             datasets["train"],
             datasets["val"],
             loss_func=loss,
             finetune=is_pretrained,
-            batchsize=args["batchsize"],
         )
         solver.save_metrics_separate_yaml(dataloaders, args["destination"], args["device"], {})
 
@@ -222,15 +219,3 @@ def training(args: dict):
     torch.cuda.empty_cache()
 
     return val_loss
-
-
-def select_loss_function(args):
-    if args["train_loss"].lower() == "mae":
-        loss = L1Loss()
-    elif args["train_loss"].lower() == "mse":
-        loss = MSELoss()
-    elif args["train_loss"].lower() == "huber":
-        loss = HuberLoss()
-    elif args["train_loss"].lower() == "combi":
-        loss = CombiLoss(0.75)
-    return loss

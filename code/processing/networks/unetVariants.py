@@ -14,7 +14,9 @@ class UpsampleConv(nn.Module):
 
     def __init__(self, in_channels, out_channels):
         super().__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding="same")
+        self.conv = nn.Conv2d(
+            in_channels, out_channels, kernel_size=3, padding=1, padding_mode="reflect"
+        )
 
     @property
     def weight(self):
@@ -99,14 +101,26 @@ class UNet(Model):
         # stacked on the same tensor. Dropping the second would be a lighter
         # single-conv block, not the usual U-Net design.
         use_bias = norm is None or not norm
+        # Explicit pad: padding="same" only supports padding_mode="zeros" in PyTorch.
+        pad = kernel_size // 2
         return nn.Sequential(
             nn.Conv2d(
-                in_channels=in_channels, out_channels=features, kernel_size=kernel_size, padding="same", bias=use_bias
+                in_channels=in_channels,
+                out_channels=features,
+                kernel_size=kernel_size,
+                padding=pad,
+                padding_mode="reflect",
+                bias=use_bias,
             ),
             UNet._build_norm2d(features, norm),
             nn.ReLU(inplace=True),
             nn.Conv2d(
-                in_channels=features, out_channels=features, kernel_size=kernel_size, padding="same", bias=use_bias
+                in_channels=features,
+                out_channels=features,
+                kernel_size=kernel_size,
+                padding=pad,
+                padding_mode="reflect",
+                bias=use_bias,
             ),
             UNet._build_norm2d(features, norm),
             nn.ReLU(inplace=True),

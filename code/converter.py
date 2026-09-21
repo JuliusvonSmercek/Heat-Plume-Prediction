@@ -102,7 +102,9 @@ def process_run_data(src_path: str, dest_path: str) -> None:
     h5_renames = {
         "Permeability [m^2]": "Permeability X [m^2]",
         "Liquid X-Velocity [m_per_year]": "Liquid X-Velocity [m_per_y]",
+        "Liquid X-Velocity NoHP [m_per_year]": "Liquid X-Velocity NoHP [m_per_y]",
         "Liquid Y-Velocity [m_per_year]": "Liquid Y-Velocity [m_per_y]",
+        "Liquid Y-Velocity NoHP [m_per_year]": "Liquid Y-Velocity NoHP [m_per_y]",
         "Liquid Z-Velocity [m_per_year]": "Liquid Z-Velocity [m_per_y]",
     }
 

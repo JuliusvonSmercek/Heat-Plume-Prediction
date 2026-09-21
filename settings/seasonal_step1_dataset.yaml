@@ -1,0 +1,275 @@
+# Config for the converted DaRUS step-1-single-heat-plume dataset.
+# Convert NPZ -> RUN_*/pflotran.h5 with: python code/convert_npz_dataset.py
+# Injection profiles from temperature_injection_series.csv / normed_flow_injection_series.csv
+# (1-year cycle from series year 8 = strongest seasonal swing; dt = 18.25 d = 0.05 y).
+# Normed flow scaled by 0.0005 -> m^3/s; temp = ambient(10) + ΔT; spread = 5.0015006.
+run_configuration:
+  run_name: seasonal_new_dataset
+  dataset: step-1-single-heat-plume
+  seed: 2406
+  device: cuda:1
+  use_velocity_model: false
+
+  pipeline:
+    # - clean: data_prep
+    - clean: results-step1
+    - step1: train
+    - clean: results-step2
+    - step2: run
+    - clean: results-step3
+    - step3: train
+
+general_configuration:
+  step1:
+    datapoints:
+      train: [0, 1, 2, 3, 4]
+      validation: [5, 6, 7]
+      test: [8, 9, 10]
+    general:
+      epochs: 1
+      visualize: true
+      visualize_epochs: true
+    scheduler:
+      type: ReduceLROnPlateau
+      init_lr: 1e-4
+      mode: min
+      factor: 0.2
+      patience: 10
+      threshold: 1e-3
+      min_lr: 1e-6
+    model_parameters:
+      network: unet
+      inputs: [p, k, i]
+      outputs: [x, y]
+      batchsize: 20
+      kernel_size: 5
+      depth: 4
+      init_features: 32
+      stride: 1
+      dilation: 1
+      norm: batchnorm
+      repeat_inner: false
+      skip_per_dir: 16
+      len_box: 100
+      train_loss: MSE
+      bool_cutouts: true
+      optimizer_switch: false
+      optimizer: Adam
+      activation: ReLU
+
+  step2:
+    rwpt:
+      samples: 5000
+      steps: 1000
+    physical_parameters:
+      resolution_m: 1.9960906958561375  # cell size along long axis (DaRUS res_y) after transpose
+      duration_years: 10.0
+      porosity_frac: 0.25
+      rock_density_kg_per_m3: 2800.0
+      rock_specific_heat_J_per_kgK: 2000.0
+      water_density_kg_per_m3: 1000.0
+      water_specific_heat_J_per_kgK: 4180.0
+      thermal_conductivity_dry_W_per_mK: 0.65
+      thermal_conductivity_wet_W_per_mK: 1.0
+      thickness_aquifer_m: 1.0
+      longitudinal_dispersivity_m: 1.0
+      transverse_dispersivity_h_m: 0.1
+      ambient_temperature_C: 10.0
+      temperature_spread_C: 5.0015006
+      # Corrected: 73 samples/year (not 20×18.25d); year=0, abs=[4.998499, 15.001501] C
+      injection_temperature_C:
+        time_unit: year
+        values:
+          0.00000: 14.6113214
+          0.01370: 14.5893097
+          0.02740: 14.6393704
+          0.04110: 14.8566027
+          0.05479: 15.0015006
+          0.06849: 14.831222
+          0.08219: 14.511815
+          0.09589: 13.9863718
+          0.10959: 13.4782093
+          0.12329: 13.2509692
+          0.13699: 12.9940102
+          0.15068: 12.6981537
+          0.16438: 12.326037
+          0.17808: 12.5664341
+          0.19178: 12.8193026
+          0.20548: 12.608732
+          0.21918: 12.3655465
+          0.23288: 12.0485194
+          0.24658: 11.6223825
+          0.26027: 11.6727948
+          0.27397: 11.8628561
+          0.28767: 11.8656663
+          0.30137: 11.4127841
+          0.31507: 9.6567394
+          0.32877: 9.0733963
+          0.34247: 9.0927515
+          0.35616: 9.21369284
+          0.36986: 8.2567482
+          0.38356: 7.4165215
+          0.39726: 7.6604066
+          0.41096: 8.30531
+          0.42466: 5.8823137
+          0.43836: 4.9984994
+          0.45205: 5.4507008
+          0.46575: 6.0893683
+          0.47945: 6.4396546
+          0.49315: 6.5676935
+          0.50685: 6.1149545
+          0.52055: 5.7349114
+          0.53425: 5.696841
+          0.54795: 5.8062854
+          0.56164: 6.3486977
+          0.57534: 7.09082
+          0.58904: 6.4606082
+          0.60274: 6.044054
+          0.61644: 6.438609
+          0.63014: 6.8774686
+          0.64384: 7.1599693
+          0.65753: 7.4861183
+          0.67123: 8.2388432
+          0.68493: 9.32450986
+          0.69863: 9.62004623
+          0.71233: 9.89444882
+          0.72603: 10.42622942
+          0.73973: 10.92577255
+          0.75342: 11.1410718
+          0.76712: 11.3386136
+          0.78082: 11.5171611
+          0.79452: 11.4082884
+          0.80822: 11.8707176
+          0.82192: 12.5643747
+          0.83562: 13.299524
+          0.84932: 13.7293901
+          0.86301: 13.756423
+          0.87671: 13.8493292
+          0.89041: 14.0494576
+          0.90411: 14.1423326
+          0.91781: 14.09427
+          0.93151: 14.0231924
+          0.94521: 13.9491553
+          0.95890: 13.8661854
+          0.97260: 14.4474707
+          0.98630: 14.9041743
+          1.00000: 14.6113214
+      injection_rate_m3_per_s:
+        time_unit: year
+        values:
+          0.00000: 0.002014388
+          0.01370: 0.0020062542
+          0.02740: 0.002026641
+          0.04110: 0.0021103313
+          0.05479: 0.0021848316
+          0.06849: 0.00212474585
+          0.08219: 0.0019709201
+          0.09589: 0.0017343838
+          0.10959: 0.0015194045
+          0.12329: 0.0014092934
+          0.13699: 0.0013078892
+          0.15068: 0.001158499
+          0.16438: 0.0010160948
+          0.17808: 0.001112124
+          0.19178: 0.00123157085
+          0.20548: 0.0011505307
+          0.21918: 0.00103335415
+          0.23288: 0.000863223
+          0.24658: 0.0007087139
+          0.26027: 0.0007308647
+          0.27397: 0.00081376115
+          0.28767: 0.0007134862
+          0.30137: 0.0006171539
+          0.31507: 0.001334873
+          0.32877: 0.0021581552
+          0.34247: 0.00208644865
+          0.35616: 0.00196619165
+          0.36986: 0.0024154895
+          0.38356: 0.0028834672
+          0.39726: 0.0022351985
+          0.41096: 0.0015375308
+          0.42466: 0.00265503835
+          0.43836: 0.00361801075
+          0.45205: 0.0032250037
+          0.46575: 0.002833353
+          0.47945: 0.0026059805
+          0.49315: 0.0024988525
+          0.50685: 0.002782055
+          0.52055: 0.00311359475
+          0.53425: 0.0031368768
+          0.54795: 0.00302032925
+          0.56164: 0.0025654762
+          0.57534: 0.0021394275
+          0.58904: 0.002517871
+          0.60274: 0.0028911097
+          0.61644: 0.00269496275
+          0.63014: 0.0024956074
+          0.64384: 0.002437574
+          0.65753: 0.0023616035
+          0.67123: 0.00182333205
+          0.68493: 0.001313686
+          0.69863: 0.0012928785
+          0.71233: 0.0012775155
+          0.72603: 0.00117946125
+          0.73973: 0.00105542205
+          0.75342: 0.00082122015
+          0.76712: 0.00058475355
+          0.78082: 0.0005
+          0.79452: 0.0006151901
+          0.80822: 0.00086703605
+          0.82192: 0.00112020935
+          0.83562: 0.0013750633
+          0.84932: 0.0016291293
+          0.86301: 0.00160822965
+          0.87671: 0.00148625815
+          0.89041: 0.0016815529
+          0.90411: 0.00180951715
+          0.91781: 0.00167830155
+          0.93151: 0.0015296099
+          0.94521: 0.0014226533
+          0.95890: 0.0013534522
+          0.97260: 0.0017008593
+          0.98630: 0.00214231635
+          1.00000: 0.002014388
+
+  step3:
+    datapoints:
+      train: [0, 1, 2, 3]
+      validation: [4, 5, 6, 7]
+      test: [8, 9, 10]
+    general:
+      epochs: 5
+      visualize: true
+      visualize_epochs: true
+    scheduler:
+      type: ReduceLROnPlateau
+      init_lr: 1e-3
+      mode: min
+      factor: 0.2
+      patience: 10
+      threshold: 1e-3
+      min_lr: 1e-6
+    model_parameters:
+      network: unet
+      inputs: [p, k, i, x, y, 7]
+      outputs: [t]
+      batchsize: 20
+      kernel_size: 3
+      depth: 3
+      init_features: 64
+      stride: 1
+      dilation: 1
+      norm: batchnorm # instancenorm, groupnorm
+      repeat_inner: false
+      skip_per_dir: 8
+      len_box: 256
+      train_loss: Huber
+      bool_cutouts: true
+      optimizer_switch: false
+      optimizer: AdamW
+      activation: LeakyReLU
+
+paths:
+  datasets_raw: ./datasets
+  datasets_prep: ./datasets_prep
+  results: ./results

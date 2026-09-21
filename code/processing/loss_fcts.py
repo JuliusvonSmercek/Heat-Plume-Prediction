@@ -1,7 +1,9 @@
 from code.utils import logging as log  # noqa: F401
+from collections.abc import Callable
 
 import torch
 import torch.nn as nn
+from torch.nn import HuberLoss, L1Loss, MSELoss
 from torchmetrics.image import StructuralSimilarityIndexMeasure
 
 
@@ -11,7 +13,7 @@ class CombiLoss(nn.Module):
     Status: Autograd safe. Suitable for training.
     """
 
-    def __init__(self, alpha: float = 1.0, second_loss: nn.Module = None):
+    def __init__(self, alpha: float = 0.75, second_loss: nn.Module = None):
         super().__init__()
         self.mse = nn.MSELoss()
         self.secondary_loss_function = second_loss if second_loss is not None else nn.L1Loss()
@@ -72,3 +74,44 @@ class PATLoss(nn.Module):
         pat = above_thresh.to(torch.float32).mean(dim=(2, 3))
 
         return (pat * 100).mean()
+
+
+# YAML ``train_loss`` names → zero-arg factories. Add new training losses here only.
+_TRAIN_LOSSES: dict[str, Callable[[], nn.Module]] = {
+    "mae": L1Loss,
+    "mse": MSELoss,
+    "huber": HuberLoss,
+    "combi": CombiLoss,
+}
+
+
+def get_train_loss(name: str) -> nn.Module:
+    """Instantiate a training loss by YAML name (case-insensitive)."""
+    key = name.strip().lower()
+    if key not in _TRAIN_LOSSES:
+        raise ValueError(f"Unknown train_loss '{name}'. Choose from: {sorted(_TRAIN_LOSSES)}")
+    return _TRAIN_LOSSES[key]()
+
+
+# Post-training report metrics (measurements.yaml). PAT is channel-dependent — see ``make_pat_loss``.
+DEFAULT_PAT_THRESHOLD: float = 0.1
+_EVAL_METRICS: dict[str, Callable[[], nn.Module]] = {
+    "Huber": HuberLoss,
+    "Linf": LinfLoss,
+    "MAE": L1Loss,
+    "MSE": MSELoss,
+    "SSIM": SSIMLoss,
+}
+# Per-channel on denormalized labels (SSIM stays full-field on normalized tensors).
+CHANNELWISE_EVAL_NAMES: tuple[str, ...] = tuple(name for name in _EVAL_METRICS if name != "SSIM")
+EVAL_METRIC_NAMES: tuple[str, ...] = (*_EVAL_METRICS.keys(), "PAT")
+
+
+def get_eval_metrics(device: str | torch.device) -> dict[str, nn.Module]:
+    """Instantiate fixed evaluation metrics and move them to ``device``."""
+    return {name: factory().to(device) for name, factory in _EVAL_METRICS.items()}
+
+
+def make_pat_loss(num_channels: int, device: str | torch.device) -> PATLoss:
+    """PAT metric sized to the prediction channel count."""
+    return PATLoss(pat_thresholds=[DEFAULT_PAT_THRESHOLD] * num_channels).to(device)

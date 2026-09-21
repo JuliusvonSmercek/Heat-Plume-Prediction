@@ -40,11 +40,12 @@ def init_data(
 
 
 def construct_dataloader(batch_size: int, dataset: DatasetBasis, shuffle: bool) -> DataLoader:
+    effective_batch = min(len(dataset), batch_size)
     return DataLoader(
         dataset,
-        batch_size=min(len(dataset), batch_size),
+        batch_size=effective_batch,
         shuffle=shuffle,
-        drop_last=True,
+        drop_last=len(dataset) > effective_batch,
         num_workers=4,  # new, before: 0
         pin_memory=True,  # new
         persistent_workers=True,  # new: makes progress approx. 10 times faster

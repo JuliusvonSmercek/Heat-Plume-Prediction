@@ -15,11 +15,12 @@ def run_pipeline(config) -> None:
     from code.streamlines.streamline_main import execute_streamline_pipeline
     from code.utils.utils_args import save_yaml
 
-    set_seed(config.run_configuration.seed)
+    set_seed(config.run_configuration.seed, config.run_configuration.device)
     run_dir = config.paths.results / config.run_configuration.run_name
     run_dir.mkdir(parents=True, exist_ok=True)
     save_yaml(config.model_dump(), run_dir / "config.yaml")
 
+    physical = config.general_configuration.step2.physical_parameters
     for action in config.run_configuration.pipeline:
         for key, value in action.items():
             match key:
@@ -27,11 +28,21 @@ def run_pipeline(config) -> None:
                     clean_target(config, value)
                 case "step1":
                     step_cnn(
-                        config.run_configuration, config.paths, config.general_configuration.step1, "step1", value
+                        config.run_configuration,
+                        config.paths,
+                        config.general_configuration.step1,
+                        "step1",
+                        value,
+                        physical,
                     )
                 case "step2":
                     execute_streamline_pipeline(config, value)
                 case "step3":
                     step_cnn(
-                        config.run_configuration, config.paths, config.general_configuration.step3, "step3", value
+                        config.run_configuration,
+                        config.paths,
+                        config.general_configuration.step3,
+                        "step3",
+                        value,
+                        physical,
                     )

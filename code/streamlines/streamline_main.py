@@ -3,13 +3,13 @@ from code.preprocessing.datasets.dataset import DatasetType
 from code.preprocessing.preprocessing import preprocessing
 from code.preprocessing.transforms import NormalizeTransform
 from code.processing.networks.unetVariants import UNet
-from code.streamlines.calculation.streamline_calculation import compute_physics_streamlines
 from code.streamlines.environment_pre import (
     extract_heat_pump_positions,
     load_velocity_field,
     run_visualization,
     save_result,
 )
+from code.streamlines.streamline_rwpt import run_rwpt_thermal_prior
 from code.streamlines.tensor_manipulation import (
     create_property_index_map,
     crop_and_merge_tensors,
@@ -20,13 +20,10 @@ from code.utils import logging as log  # noqa: F401
 from code.utils.utils_args import get_data_prep_path, load_yaml, make_data_prep_dir
 from code.utils.yaml_parser import AppConfig, SimulationStepConfig, convert_injection_config
 from pathlib import Path
-
-import matplotlib
+from typing import Any
 import torch
+from torch.nn import Module
 from tqdm import tqdm
-
-# Set backend to Agg for headless production environments
-matplotlib.use("Agg")
 
 
 def process_single_datapoint(
@@ -36,7 +33,7 @@ def process_single_datapoint(
     results_path: Path,
     step2_config: SimulationStepConfig,
     use_velocity_model: bool,
-    model: UNet | None,
+    model: Module | None,
     norm_v: NormalizeTransform,
     norm_before: NormalizeTransform,
     norm_after: NormalizeTransform,
@@ -66,13 +63,23 @@ def process_single_datapoint(
     pos_hps_np = extract_heat_pump_positions(inputs_merged, step3_map["i"])
     log.info(f"Processing {run_id}: {pos_hps_np.shape[0]} heat pumps detected.")
 
-    streamlines = compute_physics_streamlines(
-        step2_config,
-        torch.from_numpy(pos_hps_np).float().to(device),
-        velocity_field[step1_map["x"]].float().t().to(device),
-        velocity_field[step1_map["y"]].float().t().to(device),
-        inputs_merged[step3_map["i"]].shape,
+    heat_pump_pos = torch.from_numpy(pos_hps_np).float().to(device)
+    vx_m_per_year = velocity_field[step1_map["x"]].float().t().to(device)
+    vy_m_per_year = velocity_field[step1_map["y"]].float().t().to(device)
+    dims = inputs_merged[step3_map["i"]].shape
+
+    viz_dir = results_path / run_path.stem / "rwpt"
+    thermal_prior: torch.Tensor = run_rwpt_thermal_prior(
+        step2_config.rwpt,
+        step2_config.physical_parameters,
+        heat_pump_pos.clone(),
+        vx_m_per_year,
+        vy_m_per_year,
+        dims,
+        viz_dir=viz_dir,
     )
+
+    streamlines = {"7": thermal_prior}
 
     (temp, seasonalCycleSteps) = convert_injection_config(
         step2_config.physical_parameters.injection_temperature_C,
@@ -82,20 +89,37 @@ def process_single_datapoint(
     )
     min_temp = temp.min()
     max_temp = temp.max()
+    ambient_temperature_C = step2_config.physical_parameters.ambient_temperature_C
 
     datasetType = None
-    if min_temp > 10.6:
+    if min_temp > ambient_temperature_C:
         datasetType = DatasetType.steady_state_heating
-        log.info(f"Dataset type: Steady State Heating (min temp {min_temp}°C > 10.6°C)")
-    elif max_temp <= 10.6:
+        log.info(
+            f"Dataset type: Steady State Heating (min temp {min_temp}°C > {ambient_temperature_C}°C)"
+        )
+    elif max_temp <= ambient_temperature_C:
         datasetType = DatasetType.steady_state_cooling
-        log.info(f"Dataset type: Steady State Cooling (max temp {max_temp}°C <= 10.6°C)")
+        log.info(
+            f"Dataset type: Steady State Cooling (max temp {max_temp}°C <= {ambient_temperature_C}°C)"
+        )
     else:
         datasetType = DatasetType.seasonal
-        log.info(f"Dataset type: Seasonal (min temp {min_temp}°C <= 10.6°C < max temp {max_temp}°C)")
+        log.info(
+            f"Dataset type: Seasonal "
+            f"(min temp {min_temp}°C <= {ambient_temperature_C}°C < max temp {max_temp}°C)"
+        )
 
     # 4. Visualize & Save
-    run_visualization(datasetType, streamlines, results_path, run_path.stem)
+    phys = step2_config.physical_parameters
+    run_visualization(
+        datasetType,
+        streamlines,
+        results_path,
+        run_path.stem,
+        cells_size=norm_before.info["CellsSize"],
+        ambient_temperature_C=phys.ambient_temperature_C,
+        temperature_spread_C=phys.temperature_spread_C,
+    )
     save_result(destination_path, run_id, inputs_merged, streamlines, norm_after, step3_map, step2_map)
 
     log.info(f"Finished {run_id} in {time.time() - start_time:.2f}s")
@@ -106,15 +130,15 @@ def initialize_velocity_model(
     device: torch.device,
     use_velocity_model: bool,
     origin_data_path: Path,
-) -> tuple[UNet | None, Path]:
-    """Initializes the UNet model if velocity prediction is required."""
+) -> tuple[Module | None, Path]:
+    """Initializes the step1 velocity model if prediction is required."""
     if not use_velocity_model:
         return None, origin_data_path
 
     model_dir = config.paths.results / config.run_configuration.run_name / "step1"
     model_config = config.general_configuration.step1.model_parameters
 
-    model = UNet(
+    model: Module = UNet(
         in_channels=len(model_config.inputs),
         out_channels=len(model_config.outputs),
         kernel_size=model_config.kernel_size,

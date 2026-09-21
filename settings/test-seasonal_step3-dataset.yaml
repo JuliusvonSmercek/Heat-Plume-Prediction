@@ -1,19 +1,18 @@
-# Minimal steady-state smoke config (1 epoch, 2 RUNs, tiny streamlines).
-# Prep expects tests/heatplume_steady_smoke/datasets/dataset_giant_100hp_varyK
-# with RUN_1, RUN_2 (+ inputs/) — created by the unittest helper.
-# Full step2/3 on this 2560^2 / 100-HP dataset needs CUDA; the unittest runs step1-only on CPU.
+# Config for converted DaRUS full_dataset (step-3 scaled domain, 2560x2560).
+# Convert with: python -m code.convert_npz_dataset --src datasets/full_dataset-raw --out datasets/full_dataset
+# Physical params / injection cycle: 10×73 samples/year (+ wrap), ambient=10 C,
+# abs T ≈ [4.998, 15.002] C, flow_scale=0.0005 (see conversion_info.yaml).
+# Step2 sample counts kept low: many injection wells per RUN (up to ~2300).
+# datapoints are 0-based indices into sorted RUN_* ids (not raw Sim IDs).
 run_configuration:
-  run_name: steady_smoke
-  dataset: dataset_giant_100hp_varyK
+  run_name: full_dataset
+  dataset: full_dataset
   seed: 2406
-  device: cpu
+  device: cuda:3
   use_velocity_model: false
 
   pipeline:
-    - clean: data_prep
-    - clean: results-step1
     - clean: results-step2
-    - step1: train
     - step2: run
     - clean: results-step3
     - step3: train
@@ -21,12 +20,13 @@ run_configuration:
 general_configuration:
   step1:
     datapoints:
-      train: [0]
-      validation: [1]
-      test: [1]
+      train: [0, 1, 2]
+      validation: [3]
+      test: [13, 14, 15, 16]
     general:
       epochs: 1
-      visualize: false
+      visualize: false  # full 2560² fields OOM on A100-40GB during viz/val batches
+      visualize_epochs: false
     scheduler:
       type: ReduceLROnPlateau
       init_lr: 1e-4
@@ -39,10 +39,10 @@ general_configuration:
       network: unet
       inputs: [p, k, i]
       outputs: [x, y]
-      batchsize: 1
+      batchsize: 4
       kernel_size: 5
-      depth: 2
-      init_features: 8
+      depth: 4
+      init_features: 32
       stride: 1
       dilation: 1
       norm: batchnorm
@@ -50,23 +50,18 @@ general_configuration:
       skip_per_dir: 16
       len_box: 256
       train_loss: MSE
-      bool_cutouts: false
+      bool_cutouts: true
       optimizer_switch: false
       optimizer: Adam
       activation: ReLU
 
   step2:
-    streamlines:
-      samples: 4
-      steps: 4
-      diffusion_scale: 0.05
-      diffusion_base: 1.8
     rwpt:
-      samples: 8
-      steps: 4
+      samples: 1
+      steps: 1000
     physical_parameters:
-      resolution_m: 5.0
-      duration_years: 27.5
+      resolution_m: 1.9511527940601798
+      duration_years: 10.0
       porosity_frac: 0.25
       rock_density_kg_per_m3: 2800.0
       rock_specific_heat_J_per_kgK: 2000.0
@@ -77,27 +72,33 @@ general_configuration:
       thickness_aquifer_m: 1.0
       longitudinal_dispersivity_m: 1.0
       transverse_dispersivity_h_m: 0.1
-      ambient_temperature_C: 10.6
-      temperature_spread_C: 5.0
+      ambient_temperature_C: 10.0
+      temperature_spread_C: 5.001500606536865
+      # Corrected: 10 y × 73 samples/year (+ wrap); year=0, ambient=10, abs=[4.998499, 15.001501] C
       injection_temperature_C:
         time_unit: year
         values:
-          0.0: 15.6
-          1.0: 15.6
+          0.00000: 15.0
+          0.24900: 15.0
+          0.25000: 5.0
+          0.75000: 5.0
+          0.75100: 15.0
+          1.00000: 15.0
       injection_rate_m3_per_s:
         time_unit: year
         values:
-          0.0: 0.00024
-          1.0: 0.00024
+          0.00000: 0.0020
+          1.00000: 0.0020
 
   step3:
     datapoints:
-      train: [0]
-      validation: [1]
-      test: [1]
+      train: [0, 1, 2, 3, 4, 5, 6, 7]
+      validation: [8, 9, 10, 11, 12]
+      test: [13, 14, 15, 16]
     general:
-      epochs: 1
-      visualize: false
+      epochs: 3
+      visualize: false  # avoid full-field viz OOM on 2560²
+      visualize_epochs: false
     scheduler:
       type: ReduceLROnPlateau
       init_lr: 1e-3
@@ -108,12 +109,12 @@ general_configuration:
       min_lr: 1e-6
     model_parameters:
       network: unet
-      inputs: [p, k, i, x, y, 1, 2, 3, 5, 7]
+      inputs: [p, k, i, x, y, 7]
       outputs: [t]
-      batchsize: 1
+      batchsize: 4
       kernel_size: 3
-      depth: 2
-      init_features: 8
+      depth: 3
+      init_features: 64
       stride: 1
       dilation: 1
       norm: batchnorm
@@ -121,12 +122,12 @@ general_configuration:
       skip_per_dir: 8
       len_box: 256
       train_loss: Huber
-      bool_cutouts: false
+      bool_cutouts: true
       optimizer_switch: false
       optimizer: AdamW
       activation: LeakyReLU
 
 paths:
-  datasets_raw: ./tests/heatplume_steady_smoke/datasets
-  datasets_prep: ./tests/heatplume_steady_smoke/datasets_prep
-  results: ./tests/heatplume_steady_smoke/results
+  datasets_raw: ./datasets
+  datasets_prep: ./datasets_prep
+  results: ./results

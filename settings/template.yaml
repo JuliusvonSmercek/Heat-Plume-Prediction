@@ -22,7 +22,8 @@ general_configuration:
       train: [4, 5]                         # Indices of data points used for training
     general:
       epochs: 20                            # Number of training cycles
-      visualize: true                       # Enable generation of plot/visualizations during training
+      visualize: true                       # Enable generation of plot/visualizations after training
+      visualize_epochs: true                # Enable generation of plot/visualizations during training
     scheduler:                              # Learning rate scheduler configuration
       type: ReduceLROnPlateau               # Scheduler type
       init_lr: 1e-4                         # Initial learning rate
@@ -56,6 +57,7 @@ general_configuration:
       optimizer: Adam                       # Optimizer type
       activation: ReLU                      # Activation function
     hopt_parameters:                        # Hyperparameter Optimization search space
+      n_trials: 100                         # Optuna trial budget
       network: [unet]
       inputs: [[p, k, i]]
       outputs: [[x, y]]
@@ -76,11 +78,6 @@ general_configuration:
       activation: [ReLU, Tanh, Sigmoid, LeakyReLU]
 
   step2:
-    streamlines:                            # Streamline tracing configuration
-      samples: 10000                        # Number of particles/samples
-      steps: 5000                           # Time steps
-      diffusion_scale: 0.05                 # Scale factor for diffusion random walk
-      diffusion_base: 1.8                   # Base diffusion coefficient
     rwpt:                           # RWPT thermal prior settings
       samples: 150000                       # Number of particles/samples for RWPT
       steps: 5000                           # Time steps for RWPT
@@ -190,6 +187,7 @@ general_configuration:
     general:
       epochs: 300
       visualize: true
+      visualize_epochs: true
       model_path: temperature_model
     scheduler:
       type: ReduceLROnPlateau
@@ -206,7 +204,7 @@ general_configuration:
     #   gamma: 0.1
     model_parameters:
       network: unet
-      inputs: [p, k, i, x, y, 1, 2, 3, 5, 7]
+      inputs: [p, k, i, x, y, 7]
       outputs: [t]
       batchsize: 20
       kernel_size: 3
@@ -225,11 +223,12 @@ general_configuration:
       activation: ReLU
     # model_parameters:                     # Alternative RNN architecture
     #   network: rnn
-    #   inputs: [p, k, i, x, y, 1, 2, 3, 5, 7]
+    #   inputs: [p, k, i, x, y, 7]
     #   outputs: [t]
     hopt_parameters:                        # Hyperparameter optimization config for Step 3
+      n_trials: 100                         # Optuna trial budget
       network: [unet]
-      inputs: [[k, i, x, y, 1, 2, 3, 5, 7]]
+      inputs: [[k, i, x, y, 7]]
       outputs: [[t]]
       batchsize: [2, 4, 8, 16]
       kernel_size: [3, 5, 7]

@@ -9,17 +9,18 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from torch.nn import Module
 
 
 def load_velocity_field(
     run_id: str,
     origin_path: Path,
     use_model: bool,
-    model: UNetNoPad2 | None,
+    model: Module | None,
     norm_transform: NormalizeTransform,
     device: torch.device,
 ) -> torch.Tensor:
-    """Loads velocity from disk or infers it using the UNet model."""
+    """Loads velocity from disk or infers it using the step1 velocity model."""
     if use_model and model is not None:
         data_in = torch.load(origin_path / "Inputs" / run_id)
         with torch.no_grad():
@@ -32,10 +33,17 @@ def load_velocity_field(
 
 
 def extract_heat_pump_positions(input_tensor: torch.Tensor, channel_index: int) -> np.ndarray:
-    """Finds coordinates where Material ID == 1 (Heat Pumps)."""
-    # Ensure tensor is on CPU before converting to numpy
-    pos_hps = get_hp_location_raw_np(input_tensor[channel_index].detach().cpu().numpy()).T.astype(float)
-    return pos_hps + 0.5
+    """Finds coordinates where Material ID == 1 (Heat Pumps). Returns shape (N, 2).
+
+    ``get_hp_location_raw_np`` squeezes a single HP to shape (2,); reshape back to
+    (2, 1) so step2 still gets one origin (multi-HP (2, N) is unchanged).
+    """
+    locs = np.asarray(get_hp_location_raw_np(input_tensor[channel_index].detach().cpu().numpy()))
+    if locs.size == 0:
+        return np.zeros((0, 2), dtype=float)
+    if locs.ndim == 1:
+        locs = locs.reshape(2, 1)
+    return locs.T.astype(float) + 0.5
 
 
 def save_result(
@@ -64,7 +72,14 @@ def save_result(
 
 
 def run_visualization(
-    datasetType: DatasetType, streamlines: dict[str, torch.Tensor], results_path: Path, run_name: str
+    datasetType: DatasetType,
+    streamlines: dict[str, torch.Tensor],
+    results_path: Path,
+    run_name: str,
+    *,
+    cells_size: list[float] | tuple[float, ...],
+    ambient_temperature_C: float,
+    temperature_spread_C: float,
 ) -> None:
     """Generates plots for all streamlines."""
     results_path.mkdir(exist_ok=True, parents=True)
@@ -73,4 +88,12 @@ def run_visualization(
         prop_name = expand_property_names(key)[0]
         output_name = results_path / f"{run_name}-{prop_name}"
 
-        visualize_streamlines(datasetType, output_name, prop_name, tensor_data)
+        visualize_streamlines(
+            datasetType,
+            output_name,
+            prop_name,
+            tensor_data,
+            cells_size=cells_size,
+            ambient_temperature_C=ambient_temperature_C,
+            temperature_spread_C=temperature_spread_C,
+        )

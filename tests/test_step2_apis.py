@@ -8,11 +8,9 @@ import torch
 
 
 class TestStep2Apis(unittest.TestCase):
-    def test_streamline_and_rwpt_entry_points_are_distinct(self):
+    def test_rwpt_entry_points(self):
         from code.streamlines.calculation import streamline_rwpt as ds
-        from code.streamlines.calculation import streamline_tensors as st
 
-        self.assertTrue(callable(st.make_streamlines_gpu))
         self.assertTrue(callable(ds.run_rwpt_thermal_prior))
         self.assertTrue(callable(ds.generate_physical_plumes))
         self.assertTrue(hasattr(ds, "RwptConfig"))
