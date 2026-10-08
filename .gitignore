@@ -1,11 +1,13 @@
 # private stuff
 .vscode/
 .venv
+.darus_apikey
 /datasets
 /datasets_prep
 /results
-/results-old
-.darus_apikey
+/logs
+/generate-reproducible-number/results/
+/generate-reproducible-number/logs/
 
 # Latex
 *.log

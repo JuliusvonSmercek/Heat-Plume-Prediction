@@ -21,7 +21,7 @@ class TestConfigParse(unittest.TestCase):
 
 
 class TestYamlIncludes(unittest.TestCase):
-    def test_path_shorthand(self):
+    def test_include_key_merges_docs(self):
         from code.utils.yaml_includes import load_yaml_with_includes
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -39,7 +39,14 @@ class TestYamlIncludes(unittest.TestCase):
                 encoding="utf-8",
             )
             (root / "main.yaml").write_text(
-                "step1: ./step1.yaml\ninjection_temperature_C: ./injection_temp.yaml\n",
+                textwrap.dedent(
+                    """\
+                    step1:
+                      include: ./step1.yaml
+                    injection_temperature_C:
+                      include: ./injection_temp.yaml
+                    """
+                ),
                 encoding="utf-8",
             )
 
@@ -52,8 +59,8 @@ class TestYamlIncludes(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / "a.yaml").write_text("x: ./b.yaml\n", encoding="utf-8")
-            (root / "b.yaml").write_text("y: ./a.yaml\n", encoding="utf-8")
+            (root / "a.yaml").write_text("include: ./b.yaml\n", encoding="utf-8")
+            (root / "b.yaml").write_text("include: ./a.yaml\n", encoding="utf-8")
             with self.assertRaises(ValueError) as ctx:
                 load_yaml_with_includes(root / "a.yaml")
             self.assertIn("Circular", str(ctx.exception))
@@ -63,7 +70,7 @@ class TestYamlIncludes(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / "main.yaml").write_text("step1: ./missing.yaml\n", encoding="utf-8")
+            (root / "main.yaml").write_text("include: ./missing.yaml\n", encoding="utf-8")
             with self.assertRaises(FileNotFoundError):
                 load_yaml_with_includes(root / "main.yaml")
 

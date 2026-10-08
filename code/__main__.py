@@ -92,7 +92,9 @@ def _ensure_runtime_before_torch() -> None:
         os.execv(sys.executable, [sys.executable, "-m", "code", *sys.argv[1:]])
 
 
-_ensure_runtime_before_torch()
+# Only when launched as ``python -m code`` — never when unittest imports this module.
+if __name__ == "__main__":
+    _ensure_runtime_before_torch()
 
 from code.processing.cnn_main import step_cnn
 from code.streamlines.streamline_main import execute_streamline_pipeline

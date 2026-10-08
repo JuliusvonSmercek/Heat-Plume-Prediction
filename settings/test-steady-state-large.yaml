@@ -1,10 +1,10 @@
 # Minimal steady-state smoke config (1 epoch, 2 RUNs, tiny streamlines).
-# Prep expects tests/heatplume_steady_smoke/datasets/dataset_giant_100hp_varyK
+# Prep expects tests/heatplume_steady_smoke/datasets/steady-state-large
 # with RUN_1, RUN_2 (+ inputs/) — created by the unittest helper.
 # Full step2/3 on this 2560^2 / 100-HP dataset needs CUDA; the unittest runs step1-only on CPU.
 run_configuration:
   run_name: steady_smoke
-  dataset: dataset_giant_100hp_varyK
+  dataset: steady-state-large
   seed: 2406
   device: cpu
   use_velocity_model: false
@@ -124,6 +124,6 @@ general_configuration:
       activation: LeakyReLU
 
 paths:
-  datasets_raw: ./tests/heatplume_steady_smoke/datasets
+  datasets_raw: ../../datasets
   datasets_prep: ./tests/heatplume_steady_smoke/datasets_prep
   results: ./tests/heatplume_steady_smoke/results

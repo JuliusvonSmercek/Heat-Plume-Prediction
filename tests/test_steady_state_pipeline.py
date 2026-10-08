@@ -1,4 +1,4 @@
-"""Steady-state pipeline smoke test (settings/steady-state-test.yaml)."""
+"""Steady-state pipeline smoke test (settings/test-steady-state-large.yaml)."""
 
 from __future__ import annotations
 
@@ -16,39 +16,24 @@ from helpers import ROOT, run_pipeline
 SMOKE_STEADY_OUT = Path(__file__).resolve().parent / "heatplume_steady_smoke"
 
 
-def _ensure_minimal_steady_raw(smoke_root: Path) -> Path:
-    """Symlink two RUN folders + inputs into an isolated smoke dataset."""
-    src = ROOT / "datasets" / "dataset_giant_100hp_varyK"
-    if not (src / "RUN_1" / "pflotran.h5").is_file():
-        raise unittest.SkipTest(f"Steady-state raw data missing under {src}")
-
-    dst = smoke_root / "datasets" / "dataset_giant_100hp_varyK"
-    dst.mkdir(parents=True, exist_ok=True)
-    for name in ("RUN_1", "RUN_2", "inputs"):
-        link = dst / name
-        if link.exists() or link.is_symlink():
-            continue
-        link.symlink_to(src / name)
-    return dst
-
-
 class TestSteadyStatePipelineSmoke(unittest.TestCase):
     def test_steady_state_yaml_minimal_pipeline(self):
-        """Run settings/steady-state-test.yaml (1 epoch, 2 RUNs, tiny streamlines).
+        """Run settings/test-steady-state-large.yaml (1 epoch, tiny streamlines).
 
         Artifacts under tests/heatplume_steady_smoke/ (not cleaned up).
         On CPU, only step1 runs (2560² / 100 HPs is too heavy); full pipeline needs CUDA.
         """
         from code.utils.yaml_parser import parse_config
 
-        if not (ROOT / "datasets" / "dataset_giant_100hp_varyK" / "RUN_1" / "pflotran.h5").is_file():
-            self.skipTest("dataset_giant_100hp_varyK not available")
+        config = parse_config(str(ROOT / "settings" / "test-steady-state-large.yaml"))
+        raw = Path(config.paths.datasets_raw) / config.run_configuration.dataset
+        if not (raw / "RUN_1" / "pflotran.h5").is_file():
+            self.skipTest(f"steady-state-large dataset not available under {raw}")
 
         smoke_root = SMOKE_STEADY_OUT
         smoke_root.mkdir(parents=True, exist_ok=True)
-        _ensure_minimal_steady_raw(smoke_root)
-
-        config = parse_config(str(ROOT / "settings" / "steady-state-test.yaml"))
+        config.paths.datasets_prep = smoke_root / "datasets_prep"
+        config.paths.results = smoke_root / "results"
 
         # Giant 2560² + 100 HPs: keep full YAML for GPU; step1-only on CPU for wall-time.
         full_pipeline = torch.cuda.is_available() and str(config.run_configuration.device).startswith("cuda")
@@ -77,7 +62,10 @@ class TestSteadyStatePipelineSmoke(unittest.TestCase):
             )
             if str(config.run_configuration.device) == "cpu" or not torch.cuda.is_available():
                 stack.enter_context(
-                    patch("torch.cuda.get_device_properties", return_value=SimpleNamespace(total_memory=8 * 1024**3))
+                    patch(
+                        "torch.cuda.get_device_properties",
+                        return_value=SimpleNamespace(total_memory=8 * 1024**3, major=8, minor=0),
+                    )
                 )
                 stack.enter_context(patch("torch.cuda.memory_allocated", return_value=0))
                 stack.enter_context(patch("torch.cuda.synchronize"))

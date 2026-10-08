@@ -14,7 +14,7 @@ stationary field, which the end-state field satisfies by construction.
 
 Formulation: sampled Darcy flux -> seepage velocity -> thermal velocity v_s/R,
 alpha |v_s| / R mechanical dispersion, deposition via the particle's own analytic
-transition kernel (see deposit_energy_gaussian).
+transition kernel (see deposit_energy_quadrature).
 
 Fixed-flux vs. maximum principle
 --------------------------------
@@ -58,14 +58,21 @@ Deposit kernel
 Each particle's one-step displacement is drawn from a known anisotropic Gaussian (mean
 = advective drift, std = sigmaL/sigmaT along/across the local flow direction) -- exactly
 what drives the random walk itself. Rather than sampling one random position and
-splatting a hard point there (bilinear Cloud-in-Cell), deposit_energy_gaussian deposits
-that analytic kernel directly, centered at the pre-step position. This removes the
-"which of 4 corners did this one random draw land in" shot noise without introducing
-any smoothing beyond what the physics already implies, since the kernel width is the
-same sigmaL/sigmaT already used to perturb the particle. The solver logs the largest
-sigmaL/sigmaT it actually saw against the configured kernel radius so truncation (kernel
-too small for the dispersion actually occurring) is visible in the run log rather than
-silently biasing the result.
+splatting a hard point there (bilinear Cloud-in-Cell, deposit_energy_cic) or
+materializing that Gaussian's full PDF over a truncated patch of grid cells
+(deposit_energy_gaussian, kept below for reference), deposit_energy_quadrature
+represents the same anisotropic Gaussian by a small, FIXED number of weighted points --
+Gauss-Hermite quadrature nodes along the local (longitudinal, transverse) axes, chosen
+so their mean and variance exactly match the true kernel's for any sigma -- and
+bilinearly (CIC) splats each of those points onto its own 4 neighbouring cells. This
+removes both the "which of 4 corners did this one random draw land in" shot noise of
+plain CIC AND the sigma-dependent cost/truncation tradeoff of the patch-based kernel:
+quadrature cost is a fixed 2*P^2 scatter-adds per particle per step (P =
+points_per_axis, default 3) regardless of how large sigma gets, so unlike
+deposit_energy_gaussian it needs no per-grid-level radius tuning as the multi-resolution
+driver moves from coarse (physically large pixels, small sigma in px) to fine (small
+pixels, large sigma in px) levels. A quadrature point that lands outside the domain is
+simply dropped (absorbing boundary), same as deposit_energy_cic.
 """
 
 from __future__ import annotations
@@ -75,6 +82,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
@@ -100,7 +108,10 @@ SEED_RADIUS_PX: float = 1.0
 # Acceptance-iteration defaults (overridable via mode_rwpt attributes)
 # --------------------------------------------------------------------------------- #
 # Sample count used for every grid level except the final (full-resolution) one.
-DEFAULT_COARSE_SAMPLES: int = 10_000
+# Floor on the fraction-scaled sample count at a coarse level (see run_rwpt_thermal_prior)
+# so an aggressive acceptance_grid_fractions entry combined with a modest fine `samples`
+# can't collapse to too few particles to be statistically meaningful.
+DEFAULT_MIN_COARSE_SAMPLES: int = 1_000
 # Break a stage once the worst overshoot beyond the physical band drops below this (C).
 # Larger -> stop sooner (cheaper, looser); smaller -> iterate longer chasing the bound.
 DEFAULT_CONVERGENCE_THRESHOLD_C: float = 0.05
@@ -121,25 +132,14 @@ DEFAULT_ACCEPTANCE_BLUR_PX: float = 1.0
 DEFAULT_ACCEPTANCE_GRID_FRACTIONS: list[float] = [1.0]
 DEFAULT_ACCEPTANCE_GRID_MAX_ITERS: list[int] = [1]
 
-# Deposit kernel: how many sigma-widths of patch to materialize per particle per step.
-# Larger radius captures more of the true tail (less truncation bias) but costs
-# (2r+1)^2 scatter-add work per particle per step instead of CIC's fixed 4.
-#
-# sigmaL/sigmaT (in PIXELS) scale as 1/dx for the same physical dispersion width, so a
-# radius tuned for the full-resolution grid silently truncates at every coarser
-# multi-resolution level, which uses physically LARGER pixels -> physically the same
-# dispersion spreads over MORE pixels. Rather than picking one fixed radius (and
-# manually re-tuning it whenever the grid or resolution changes), the driver computes
-# it automatically per level -- see _auto_deposit_kernel_radius_px -- from the same
-# dispersion physics local_transport_state uses, evaluated at the field's fastest
-# seepage velocity (worst case, since mechanical dispersion grows with |v_s|) and that
-# level's own dt. deposit_kernel_radius_px (below/in yaml) becomes the MAX radius: a
-# cost ceiling exactly like the yaml `steps` value is for _min_steps_for_courant, never
-# exceeded but only used as-is when the physics actually needs that much. The per-run
-# deposit-kernel QA log line still reports what the widest step actually needed, so
-# truncation against this ceiling (rather than a badly guessed fixed radius) is visible.
-DEFAULT_MIN_DEPOSIT_KERNEL_RADIUS_PX: int = 2
-DEFAULT_DEPOSIT_KERNEL_RADIUS_PX: int = 8
+# Deposit kernel: number of Gauss-Hermite quadrature points per axis (longitudinal,
+# transverse) used to represent each particle's anisotropic Gaussian transition kernel
+# (see deposit_energy_quadrature / the module docstring). 2 matches the kernel's mean
+# and variance exactly (cheapest: 2^2=4 points/particle/step); 3 additionally matches
+# skewness/kurtosis (9 points) and is a good default. Unlike the old radius-based patch
+# kernel (deposit_energy_gaussian), this cost does NOT depend on sigma, so it needs no
+# per-grid-level tuning as the multi-resolution driver moves across resolutions.
+DEFAULT_DEPOSIT_QUADRATURE_POINTS: int = 2
 
 # Target thermal Courant number (Co = |v_T|_max * dt / dx) used to pick the step count
 # automatically. Co <= 1 means particles don't cross more than one cell per step near
@@ -185,10 +185,11 @@ class RwptConfig:
     # Memory batching constraint
     particles_per_batch_count: int
 
-    # Deposit kernel radius (px, in THIS config's own pixel units -- coarser grid
-    # levels have physically larger pixels, so the same radius covers a proportionally
-    # larger physical footprint automatically).
-    depositKernelRadius_px: int
+    # Number of Gauss-Hermite quadrature points per axis used by
+    # deposit_energy_quadrature (see the module docstring's Deposit kernel section).
+    # Fixed cost regardless of grid resolution/sigma, so unlike the old kernel radius
+    # this does not need to vary per multi-resolution level.
+    depositPointsPerAxis_count: int
 
     @property
     def timeStep_s(self) -> float:
@@ -288,8 +289,8 @@ def deposit_energy_cic(
     """Bilinear Cloud-in-Cell deposition; fixed-shape scatters only.
 
     Kept for reference and unit-test coverage (see verify_rwpt_physical_validity, test
-    3). The live solver deposits with deposit_energy_gaussian instead -- see the module
-    docstring for why.
+    3). The live solver deposits with deposit_energy_quadrature instead -- see the
+    module docstring for why.
     """
     mask_bool = active_mask_bool & (weights_J.abs() > 1e-12)
     if not mask_bool.any():
@@ -350,6 +351,12 @@ def deposit_energy_gaussian(
     kernel_radius_px: int,
 ) -> None:
     """Deposit energy as the particle's own known transition kernel instead of a point.
+
+    Kept for reference/comparison -- the live solver now deposits with
+    deposit_energy_quadrature instead (see the module docstring's Deposit kernel
+    section). This function's cost and truncation risk both scale with kernel_radius_px
+    and how large sigma actually gets, which is exactly what the quadrature-based
+    replacement avoids.
 
     A particle's one-step displacement is drawn from an anisotropic Gaussian (mean = the
     advective drift, std = sigmaL/sigmaT along/across the local flow direction) -- exactly
@@ -419,6 +426,128 @@ def deposit_energy_gaussian(
     flat_idx = (gy_idx.clamp(0, height_px - 1) * width_px + gx_idx.clamp(0, width_px - 1)).view(-1)
     flat_weight_J = weight_patch_J.view(-1)
     grid_flat_J.scatter_add_(0, flat_idx, flat_weight_J)
+
+
+def _gauss_hermite_probabilists(points_per_axis: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Nodes (in units of sigma) and weights (summing to 1) of the probabilists'
+    Gauss-Hermite quadrature for a standard normal distribution -- the smallest point
+    set that reproduces a Gaussian's low-order moments exactly.
+
+    points_per_axis=2 matches mean and variance exactly (nodes +-1, weights 1/2 each,
+    exact for polynomials up to degree 3). points_per_axis=3 additionally matches
+    skewness and kurtosis (nodes 0, +-sqrt(3), weights 2/3, 1/6, 1/6, exact up to
+    degree 5). Used by deposit_energy_quadrature to deposit each particle's own
+    anisotropic Gaussian transition kernel as a small, fixed set of weighted points
+    instead of materializing its PDF over a variable-size patch of grid cells (see the
+    module docstring's Deposit kernel section).
+    """
+    nodes, weights = np.polynomial.hermite_e.hermegauss(points_per_axis)
+    weights = weights / weights.sum()
+    return torch.tensor(nodes, dtype=torch.float32), torch.tensor(weights, dtype=torch.float32)
+
+
+@torch.jit.script
+def deposit_energy_quadrature(
+    grid_flat_J: torch.Tensor,
+    positions_px: torch.Tensor,
+    weights_J: torch.Tensor,
+    active_mask_bool: torch.Tensor,
+    uL_dimless: torch.Tensor,
+    sigmaL_px: torch.Tensor,
+    sigmaT_px: torch.Tensor,
+    width_px: int,
+    height_px: int,
+    quadNodes_sigma: torch.Tensor,
+    quadWeights_dimless: torch.Tensor,
+) -> None:
+    """Deposit energy at a small, fixed set of quadrature points instead of a
+    truncated patch (deposit_energy_gaussian) or a single random draw (deposit_energy_cic).
+
+    Represents the particle's anisotropic Gaussian transition kernel (mean = the
+    advective drift, std = sigmaL/sigmaT along/across the local flow direction) by its
+    Gauss-Hermite quadrature points along each of the local (longitudinal, transverse)
+    axes (see _gauss_hermite_probabilists) -- chosen so their mean and variance exactly
+    match the true kernel's for ANY sigma -- and bilinearly (Cloud-in-Cell) splats each
+    of the resulting points**points_per_axis quadrature points onto its own 4
+    neighbouring cells.
+
+    Cost is a fixed 2 * quadNodes_sigma.size(0)^2 expected scatter-adds per particle per
+    step, independent of how large sigma gets -- unlike deposit_energy_gaussian, this
+    never truncates and never needs its point count re-tuned when sigma changes (e.g.
+    across the multi-resolution acceptance driver's grid levels). A quadrature point
+    that lands outside the domain is simply dropped (its share of the weight is lost
+    off-domain), the same absorbing-boundary behaviour deposit_energy_cic already has.
+    """
+    mask_bool = active_mask_bool & (weights_J.abs() > 1e-12)
+    if not mask_bool.any():
+        return
+
+    pos_px = positions_px[mask_bool]
+    w_J = weights_J[mask_bool]
+    uL_sel = uL_dimless[mask_bool]
+    sigL_px = sigmaL_px[mask_bool].clamp(min=1e-6)
+    sigT_px = sigmaT_px[mask_bool].clamp(min=1e-6)
+
+    num_sel = pos_px.size(0)
+    points_count = quadNodes_sigma.size(0)
+
+    uLx = uL_sel[:, 0].view(num_sel, 1, 1)
+    uLy = uL_sel[:, 1].view(num_sel, 1, 1)
+    uTx = (-uL_sel[:, 1]).view(num_sel, 1, 1)
+    uTy = uL_sel[:, 0].view(num_sel, 1, 1)
+
+    px_val = pos_px[:, 0]
+    py_val = pos_px[:, 1]
+
+    # Quadrature offsets along the local L/T axes, in px: (N, P, 1) and (N, 1, P).
+    offL_px = quadNodes_sigma.view(1, points_count, 1) * sigL_px.view(num_sel, 1, 1)
+    offT_px = quadNodes_sigma.view(1, 1, points_count) * sigT_px.view(num_sel, 1, 1)
+
+    # Quadrature point absolute positions, tensor product over (L, T): (N, P, P).
+    qx_px = px_val.view(num_sel, 1, 1) + offL_px * uLx + offT_px * uTx
+    qy_px = py_val.view(num_sel, 1, 1) + offL_px * uLy + offT_px * uTy
+
+    # Tensor-product quadrature weight per point, times the particle's own weight.
+    quadW_pp = quadWeights_dimless.view(1, points_count, 1) * quadWeights_dimless.view(1, 1, points_count)
+    point_weight_J = (w_J.view(num_sel, 1, 1) * quadW_pp).reshape(-1)
+
+    qx_flat = qx_px.reshape(-1)
+    qy_flat = qy_px.reshape(-1)
+
+    x0_px = torch.floor(qx_flat).to(torch.long)
+    y0_px = torch.floor(qy_flat).to(torch.long)
+    x1_px = x0_px + 1
+    y1_px = y0_px + 1
+
+    fx_dimless = qx_flat - x0_px.to(qx_flat.dtype)
+    fy_dimless = qy_flat - y0_px.to(qy_flat.dtype)
+
+    # w_ij = w (1-fx)^(1-i) fx^i (1-fy)^(1-j) fy^j per quadrature point, same bilinear
+    # split as deposit_energy_cic, just applied to each of the P*P points instead of one.
+    w00_J = point_weight_J * (1.0 - fx_dimless) * (1.0 - fy_dimless)
+    w10_J = point_weight_J * fx_dimless * (1.0 - fy_dimless)
+    w01_J = point_weight_J * (1.0 - fx_dimless) * fy_dimless
+    w11_J = point_weight_J * fx_dimless * fy_dimless
+
+    m00_bool = (x0_px >= 0) & (x0_px < width_px) & (y0_px >= 0) & (y0_px < height_px)
+    if m00_bool.any():
+        idx00_idx = y0_px[m00_bool] * width_px + x0_px[m00_bool]
+        grid_flat_J.scatter_add_(0, idx00_idx, w00_J[m00_bool])
+
+    m10_bool = (x1_px >= 0) & (x1_px < width_px) & (y0_px >= 0) & (y0_px < height_px)
+    if m10_bool.any():
+        idx10_idx = y0_px[m10_bool] * width_px + x1_px[m10_bool]
+        grid_flat_J.scatter_add_(0, idx10_idx, w10_J[m10_bool])
+
+    m01_bool = (x0_px >= 0) & (x0_px < width_px) & (y1_px >= 0) & (y1_px < height_px)
+    if m01_bool.any():
+        idx01_idx = y1_px[m01_bool] * width_px + x0_px[m01_bool]
+        grid_flat_J.scatter_add_(0, idx01_idx, w01_J[m01_bool])
+
+    m11_bool = (x1_px >= 0) & (x1_px < width_px) & (y1_px >= 0) & (y1_px < height_px)
+    if m11_bool.any():
+        idx11_idx = y1_px[m11_bool] * width_px + x1_px[m11_bool]
+        grid_flat_J.scatter_add_(0, idx11_idx, w11_J[m11_bool])
 
 
 @torch.jit.script
@@ -508,9 +637,10 @@ def _rwpt_stream_step(
     thermalDiffusivity_m2_per_s: float,
     secondsPerYear_s: float,
     uL_default_dimless: torch.Tensor,
-    depositKernelRadius_px: int,
+    quadNodes_sigma: torch.Tensor,
+    quadWeights_dimless: torch.Tensor,
 ) -> None:
-    """One timestep of the RWPT kernel: deposit (via the analytic transition kernel),
+    """One timestep of the RWPT kernel: deposit (via the quadrature transition kernel),
     predictor-corrector advance, absorbing-boundary latch.
 
     Split out of rwpt_seasonal_stream_kernel so the outer Python loop can drive it and
@@ -522,8 +652,9 @@ def _rwpt_stream_step(
     maxSigmaL_px_running / maxSigmaT_px_running are single-element tensors the caller
     owns; this function bumps them (in place, via torch.maximum) with the largest
     per-step dispersion sigma actually seen among ACTIVE (currently depositing)
-    particles, so the caller can log how well the deposit kernel radius covered the
-    dispersion actually occurring in this run.
+    particles, so the caller can log the dispersion actually occurring in this run
+    (purely informational now that deposit_energy_quadrature's cost and accuracy don't
+    depend on how large sigma gets).
     """
     num_particles_count = positions_px.size(0)
     device = positions_px.device
@@ -540,7 +671,7 @@ def _rwpt_stream_step(
     # For a not-yet-born particle (i_idx < birthIndices_count) age is negative, which
     # pushes injection_step_idx past steps_count-1 -- out of bounds for
     # injectionEnergyRate_J_per_s's time axis. active_mask_bool excludes these particles
-    # from the deposit itself (in deposit_energy_gaussian, below), but that mask is
+    # from the deposit itself (in deposit_energy_quadrature, below), but that mask is
     # applied AFTER this gather, so the index must be clamped into range here regardless
     # of activity: the gathered value for an inactive particle is discarded later, it just
     # can't be allowed to read out of bounds first (silently wrong on CPU, a device-side
@@ -586,7 +717,7 @@ def _rwpt_stream_step(
     maxSigmaL_px_running.copy_(torch.maximum(maxSigmaL_px_running, active_sigmaL_px.max().view(1)))
     maxSigmaT_px_running.copy_(torch.maximum(maxSigmaT_px_running, active_sigmaT_px.max().view(1)))
 
-    deposit_energy_gaussian(
+    deposit_energy_quadrature(
         accumEnergyGrid_flat_J,
         positions_px,
         current_weight_J,
@@ -596,7 +727,8 @@ def _rwpt_stream_step(
         sigmaT0_px,
         width_px,
         height_px,
-        depositKernelRadius_px,
+        quadNodes_sigma,
+        quadWeights_dimless,
     )
 
     # Same noise draw is reused by predictor and corrector (Heun). The div(D) drift
@@ -680,7 +812,7 @@ def rwpt_seasonal_stream_kernel(
     retardationFactor_dimless: float,
     secondsPerYear_s: float,
     totalSamplesPerSource_count: int,
-    depositKernelRadius_px: int = DEFAULT_DEPOSIT_KERNEL_RADIUS_PX,
+    points_per_axis: int = DEFAULT_DEPOSIT_QUADRATURE_POINTS,
     progress_desc: str = "RWPT solver steps",
 ) -> None:
     """Python-level driver over the `steps_count` timesteps.
@@ -698,9 +830,9 @@ def rwpt_seasonal_stream_kernel(
     remainder from a non-round steps_count flushed once at the end.
 
     After the loop, logs a deposit-kernel QA line: the largest sigmaL/sigmaT actually
-    seen among depositing particles versus the configured kernel radius, so a kernel
-    that's silently truncating real physical spread shows up in the log instead of just
-    quietly biasing the result.
+    seen among depositing particles, purely informational now that deposition uses a
+    fixed-size Gauss-Hermite quadrature (see deposit_energy_quadrature) whose cost and
+    accuracy don't depend on how large sigma gets.
     """
     num_particles_count = positions_px.size(0)
     device = positions_px.device
@@ -722,6 +854,10 @@ def rwpt_seasonal_stream_kernel(
 
     uL_default_dimless = torch.zeros((num_particles_count, 2), device=device)
     uL_default_dimless[:, 0] = 1.0
+
+    quadNodes_sigma, quadWeights_dimless = _gauss_hermite_probabilists(points_per_axis)
+    quadNodes_sigma = quadNodes_sigma.to(device)
+    quadWeights_dimless = quadWeights_dimless.to(device)
 
     # Monotonic latch: once a particle leaves the domain it stays inactive (absorbing
     # outflow boundary -- energy that exits the domain is gone).
@@ -764,7 +900,8 @@ def rwpt_seasonal_stream_kernel(
                 thermalDiffusivity_m2_per_s,
                 secondsPerYear_s,
                 uL_default_dimless,
-                depositKernelRadius_px,
+                quadNodes_sigma,
+                quadWeights_dimless,
             )
 
             pending_count += 1
@@ -777,22 +914,11 @@ def rwpt_seasonal_stream_kernel(
 
     maxSigmaL_px_val = float(maxSigmaL_px_running.item())
     maxSigmaT_px_val = float(maxSigmaT_px_running.item())
-    widest_sigma_px = max(maxSigmaL_px_val, maxSigmaT_px_val)
-    patch_size_px = 2 * depositKernelRadius_px + 1
     log.info(
         f"RWPT[{progress_desc}] deposit kernel QA: max sigmaL={maxSigmaL_px_val:.3f} px, "
-        f"max sigmaT={maxSigmaT_px_val:.3f} px, kernel_radius={depositKernelRadius_px} px "
-        f"(patch {patch_size_px}x{patch_size_px}, {patch_size_px * resolution_m_per_px:.2f} m across)"
+        f"max sigmaT={maxSigmaT_px_val:.3f} px, quadrature points_per_axis={points_per_axis} "
+        f"({points_per_axis * points_per_axis} points/particle/step, fixed cost regardless of sigma)"
     )
-    if widest_sigma_px > 1e-9 and depositKernelRadius_px < 3.0 * widest_sigma_px:
-        log.warning(
-            f"RWPT[{progress_desc}] deposit kernel radius {depositKernelRadius_px}px covers only "
-            f"{depositKernelRadius_px / widest_sigma_px:.1f} sigma of the widest step seen "
-            f"(sigmaL={maxSigmaL_px_val:.3f}px, sigmaT={maxSigmaT_px_val:.3f}px); consider raising "
-            f"deposit_kernel_radius_px to at least {math.ceil(3.0 * widest_sigma_px)} px so the "
-            f"kernel isn't folding a meaningful tail back onto a too-small patch (3 sigma covers "
-            f"~99% of the kernel's mass)."
-        )
 
 
 def _orient_field_hw(
@@ -843,90 +969,6 @@ def _retardation_factor(modeConstants: Any) -> float:
         modeConstants.porosity_frac * rho_cw_J_per_m3K + (1.0 - modeConstants.porosity_frac) * rho_cr_J_per_m3K
     )
     return rho_c_aq_J_per_m3K / (modeConstants.porosity_frac * rho_cw_J_per_m3K)
-
-
-def _thermal_diffusivity(modeConstants: Any) -> float:
-    """D_cond = lambda_wet / (rho c)_aq -- same formula as
-    RwptConfig.thermalDiffusivity_m2_per_s, but computable straight from modeConstants
-    before any RwptConfig exists. Needed by _auto_deposit_kernel_radius_px, which (like
-    _min_steps_for_courant) has to run BEFORE the config it would otherwise read this
-    off of.
-    """
-    rho_cw_J_per_m3K = modeConstants.water_density_kg_per_m3 * modeConstants.water_specific_heat_J_per_kgK
-    rho_cr_J_per_m3K = modeConstants.rock_density_kg_per_m3 * modeConstants.rock_specific_heat_J_per_kgK
-    rho_c_aq_J_per_m3K = (
-        modeConstants.porosity_frac * rho_cw_J_per_m3K + (1.0 - modeConstants.porosity_frac) * rho_cr_J_per_m3K
-    )
-    return modeConstants.thermal_conductivity_wet_W_per_mK / rho_c_aq_J_per_m3K
-
-
-def _expected_deposit_sigma_px(
-    vField_m_per_year: torch.Tensor,
-    resolution_m_per_px: float,
-    timeStep_s: float,
-    porosity_frac: float,
-    retardationFactor_dimless: float,
-    alphaL_m: float,
-    alphaT_m: float,
-    thermalDiffusivity_m2_per_s: float,
-) -> float:
-    """Worst-case per-step deposit-kernel sigma (px) expected at this resolution/step
-    size, from the same dispersion physics local_transport_state evaluates every step:
-
-        D_L/T = (D_cond + alpha_L/T |v_s| / R) / dx^2,  sigma = sqrt(2 D dt)
-
-    evaluated at the field's fastest seepage velocity (mechanical dispersion grows with
-    |v_s|, so the fastest-flowing cell anywhere in the field sets the widest kernel any
-    particle can actually need) rather than per-particle, since this runs once per level
-    to size the kernel radius before any particle exists.
-    """
-    maxFlux_m_per_year = torch.norm(vField_m_per_year[0], dim=0).max().item()
-    maxSeepage_m_per_s = maxFlux_m_per_year / SECONDS_PER_YEAR_S / porosity_frac
-    thermalRetardationScale_dimless = 1.0 / retardationFactor_dimless
-    res_sq_m2 = resolution_m_per_px * resolution_m_per_px
-
-    diffL_px2_per_s = (
-        thermalDiffusivity_m2_per_s + alphaL_m * maxSeepage_m_per_s * thermalRetardationScale_dimless
-    ) / res_sq_m2
-    diffT_px2_per_s = (
-        thermalDiffusivity_m2_per_s + alphaT_m * maxSeepage_m_per_s * thermalRetardationScale_dimless
-    ) / res_sq_m2
-
-    sigmaL_px = math.sqrt(max(0.0, 2.0 * diffL_px2_per_s * timeStep_s))
-    sigmaT_px = math.sqrt(max(0.0, 2.0 * diffT_px2_per_s * timeStep_s))
-    return max(sigmaL_px, sigmaT_px)
-
-
-def _auto_deposit_kernel_radius_px(
-    vField_m_per_year: torch.Tensor,
-    resolution_m_per_px: float,
-    timeStep_s: float,
-    porosity_frac: float,
-    retardationFactor_dimless: float,
-    alphaL_m: float,
-    alphaT_m: float,
-    thermalDiffusivity_m2_per_s: float,
-    min_radius_px: int,
-    max_radius_px: int,
-) -> int:
-    """Deposit kernel radius (px) sized to cover 3 sigma (~99% of the kernel's mass) of
-    the worst-case per-step dispersion at THIS level's own resolution and step size --
-    the same idea as _min_steps_for_courant, applied to the deposit patch instead of the
-    step count. sigma in pixels scales as 1/dx for a fixed physical dispersion width, so
-    this is computed fresh per grid level rather than reused from the fine level.
-
-    Clamped to [min_radius_px, max_radius_px]: max_radius_px is a cost ceiling (the
-    yaml-configured deposit_kernel_radius_px, exactly analogous to yaml `steps` capping
-    _min_steps_for_courant) so an unusually fast/dispersive field can't blow up the
-    (2r+1)^2 per-particle scatter cost unboundedly; min_radius_px keeps the patch from
-    degenerating to a single cell when the physics implies almost no spread.
-    """
-    sigma_px = _expected_deposit_sigma_px(
-        vField_m_per_year, resolution_m_per_px, timeStep_s, porosity_frac,
-        retardationFactor_dimless, alphaL_m, alphaT_m, thermalDiffusivity_m2_per_s,
-    )
-    radius_px = math.ceil(3.0 * sigma_px)
-    return max(min_radius_px, min(max_radius_px, radius_px))
 
 
 def _min_steps_for_courant(
@@ -1080,7 +1122,7 @@ def generate_physical_plumes(
                 config.retardationFactor_dimless,
                 SECONDS_PER_YEAR_S,
                 total_samples_count,
-                config.depositKernelRadius_px,
+                config.depositPointsPerAxis_count,
                 f"RWPT[{tag}] steps (batch {s_idx // samples_per_hp_batch_count + 1})",
             )
 
@@ -1338,7 +1380,7 @@ def _build_config(
     particles_per_batch: int,
     device: torch.device,
     duration_years: float,
-    deposit_kernel_radius_px: int,
+    deposit_points_per_axis: int,
     resolution_m_per_px: float,
 ) -> tuple[RwptConfig, int]:
     """Build an RwptConfig with the injection profile resampled to `steps` time steps,
@@ -1373,7 +1415,7 @@ def _build_config(
         longitudinalDispersivity_m=modeConstants.longitudinal_dispersivity_m,
         transverseDispersivityH_m=modeConstants.transverse_dispersivity_h_m,
         particles_per_batch_count=particles_per_batch,
-        depositKernelRadius_px=deposit_kernel_radius_px,
+        depositPointsPerAxis_count=deposit_points_per_axis,
     )
     return cfg, cyc1
 
@@ -1386,9 +1428,10 @@ def run_rwpt_thermal_prior(
     vy_m_per_year: torch.Tensor,
     dims_px: tuple[int, int],
     viz_dir: Path | None = None,
-) -> torch.Tensor:
-    """Multi-resolution self-consistent thermal prior, returned as a single [0, 1] map
-    (H, W).
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Multi-resolution self-consistent thermal prior.
+
+    Returns a [0, 1] map (H, W) for the CNN plus the clamped physical °C field.
 
     The acceptance field is solved on a sequence of increasingly fine spatial grids
     (see the module docstring for why), each level warm-started by bilinearly upsampling
@@ -1398,19 +1441,27 @@ def run_rwpt_thermal_prior(
     clamp removes any residual Monte-Carlo overshoot before normalization.
 
     Step counts are chosen automatically per level from the thermal Courant number
-    (see _min_steps_for_courant), each capped at that level's yaml-configured step count
-    (`steps` for the final level, `coarse_steps` for every other level) -- the yaml value
-    is a cost ceiling that is never exceeded, but is used as-is only when the flow
-    actually needs that many steps; a slower flow (or a coarser, physically-larger-pixel
-    level) uses fewer, cheaper steps for the same Courant target.
+    (see _min_steps_for_courant), each capped at that level's own step cost ceiling --
+    `steps` for the final level, `round(steps * acceptance_grid_fractions[level])` for
+    every other level (a coarser, physically-larger-pixel level needs proportionally
+    fewer steps for the same Courant target anyway, so this cap mostly just mirrors what
+    the Courant condition already gives; it's a ceiling that's never exceeded, not a
+    floor). Sample count per level is scaled the same way -- `round(samples *
+    acceptance_grid_fractions[level])`, floored at `min_coarse_samples` -- since a well's
+    physical dispersion footprint collapses onto proportionally fewer cells at coarser
+    resolution, so fewer particles are needed there for comparable per-cell statistics.
+    This is a cost optimization, not part of the correctness story: it just avoids
+    spending the fine level's full sample/step budget at every coarser level too.
 
     Tunable via mode_rwpt attributes (defaults in parentheses):
-        samples                       -- fine (final-level) sample count
-        steps                         -- fine (final-level) time steps, as a MAX (see above)
+        samples                       -- fine (final-level) sample count; scaled by
+                                          acceptance_grid_fractions[level] at coarser levels
+        steps                         -- fine (final-level) time steps, as a MAX; scaled by
+                                          acceptance_grid_fractions[level] at coarser levels
         target_courant                (1.0)         -- Courant number the step-count
                                                         selection targets
-        coarse_samples                (10_000)      -- sample count for every non-final level
-        coarse_steps                  (= steps)      -- time steps for every non-final level, as a MAX
+        min_coarse_samples            (1_000)       -- floor on the fraction-scaled
+                                                        sample count at non-final levels
         acceptance_grid_fractions     ([0.1, 0.3, 1.0])  -- grid size per level, as a
                                                              fraction of the full grid
         acceptance_grid_max_iters     ([4, 4, 3])    -- max iterations per level (last
@@ -1422,23 +1473,24 @@ def run_rwpt_thermal_prior(
         particles_per_batch           (5_000_000)   -- for the final level; non-final
                                                         levels run in a single batch sized
                                                         to fit all their (few) samples
-        deposit_kernel_radius_px      (8)           -- MAX deposit-kernel radius (px);
-                                                        each level's actual radius is
-                                                        computed automatically from that
-                                                        level's own dispersion physics
-                                                        (see _auto_deposit_kernel_radius_px)
-                                                        and capped at this value, same
-                                                        pattern as `steps` capping the
-                                                        Courant-derived step count
-        min_deposit_kernel_radius_px  (2)            -- floor on the auto-computed radius
-        auto_deposit_kernel_radius    (True)         -- set False to skip the automatic
-                                                        sizing and just use
-                                                        deposit_kernel_radius_px as a
-                                                        fixed radius at every level
+        deposit_points_per_axis       (3)           -- Gauss-Hermite quadrature points
+                                                        per axis for deposit_energy_quadrature
+                                                        (see the module docstring's Deposit
+                                                        kernel section); fixed cost, same
+                                                        value used at every grid level --
+                                                        no per-level tuning needed, unlike
+                                                        the old kernel-radius approach
 
     If viz_dir is set, a PNG is written at the start of each grid level (coarse |q| +
     warm-started acceptance) and after every acceptance iteration (temp prior,
     acceptance, overshoot), plus the post-clamp field. Tests omit viz_dir and skip I/O.
+
+    Returns
+    -------
+    normalized_01 :
+        Clamped [0, 1] map for the CNN input channel.
+    temp_C :
+        Physical temperature [°C] after the final clamp (pre-normalization).
     """
     device = heatPumpPositions_px.device
     numHps_count = len(heatPumpPositions_px)
@@ -1448,19 +1500,14 @@ def run_rwpt_thermal_prior(
     temp_spread_C = modeConstants.temperature_spread_C
 
     # Iteration controls
-    coarse_samples = int(getattr(mode_rwpt, "coarse_samples", DEFAULT_COARSE_SAMPLES))
-    coarse_steps = int(getattr(mode_rwpt, "coarse_steps", mode_rwpt.steps))
+    min_coarse_samples = int(getattr(mode_rwpt, "min_coarse_samples", DEFAULT_MIN_COARSE_SAMPLES))
     threshold_C = float(getattr(mode_rwpt, "convergence_threshold_C", DEFAULT_CONVERGENCE_THRESHOLD_C))
     relaxation = float(getattr(mode_rwpt, "acceptance_relaxation", DEFAULT_ACCEPTANCE_RELAXATION))
     blur_px = float(getattr(mode_rwpt, "acceptance_blur_px", DEFAULT_ACCEPTANCE_BLUR_PX))
-    fine_ppb = int(getattr(mode_rwpt, "particles_per_batch", 2_000_000))
-    max_deposit_kernel_radius_px = int(
-        getattr(mode_rwpt, "deposit_kernel_radius_px", DEFAULT_DEPOSIT_KERNEL_RADIUS_PX)
+    fine_ppb = int(getattr(mode_rwpt, "particles_per_batch", 5_000_000))
+    deposit_points_per_axis = int(
+        getattr(mode_rwpt, "deposit_points_per_axis", DEFAULT_DEPOSIT_QUADRATURE_POINTS)
     )
-    min_deposit_kernel_radius_px = int(
-        getattr(mode_rwpt, "min_deposit_kernel_radius_px", DEFAULT_MIN_DEPOSIT_KERNEL_RADIUS_PX)
-    )
-    auto_deposit_kernel_radius = bool(getattr(mode_rwpt, "auto_deposit_kernel_radius", False))
 
     acceptance_grid_fractions = list(
         getattr(mode_rwpt, "acceptance_grid_fractions", DEFAULT_ACCEPTANCE_GRID_FRACTIONS)
@@ -1481,17 +1528,6 @@ def run_rwpt_thermal_prior(
     # resampling in the acceptance loop reuse the same unambiguously-oriented field.
     vField_full_m_per_year = _prepare_velocity_field(vx_m_per_year, vy_m_per_year, grid_h_px, grid_w_px, device)
     retardation_dimless = _retardation_factor(modeConstants)
-    thermal_diffusivity_m2_per_s = _thermal_diffusivity(modeConstants)
-
-    def _resolve_kernel_radius_px(vField_level_m_per_year: torch.Tensor, level_resolution_m: float, level_dt_s: float) -> int:
-        if not auto_deposit_kernel_radius:
-            return max_deposit_kernel_radius_px
-        return _auto_deposit_kernel_radius_px(
-            vField_level_m_per_year, level_resolution_m, level_dt_s,
-            modeConstants.porosity_frac, retardation_dimless,
-            modeConstants.longitudinal_dispersivity_m, modeConstants.transverse_dispersivity_h_m,
-            thermal_diffusivity_m2_per_s, min_deposit_kernel_radius_px, max_deposit_kernel_radius_px,
-        )
 
     # Steps needed to keep the thermal Courant number at target_courant at full
     # resolution, capped at whatever the yaml configured as `steps` -- the yaml value is
@@ -1512,17 +1548,10 @@ def run_rwpt_thermal_prior(
     # Fine (full-resolution) config, built once: it both solves the final level and
     # supplies the physical band bounds (injection temperature extremes) used by every
     # level's overshoot check and the final clamp.
-    fine_time_step_s = (duration_years * SECONDS_PER_YEAR_S) / float(fine_steps_used)
-    fine_kernel_radius_px = _resolve_kernel_radius_px(
-        vField_full_m_per_year, modeConstants.resolution_m, fine_time_step_s
-    )
-    log.info(
-        f"RWPT fine deposit kernel radius: {fine_kernel_radius_px} px "
-        f"(max={max_deposit_kernel_radius_px} px, auto={auto_deposit_kernel_radius})"
-    )
+    log.info(f"RWPT deposit kernel: points_per_axis={deposit_points_per_axis} (fixed cost, all levels)")
     fine_cfg, _ = _build_config(
         modeConstants, numHps_count, fine_steps_used, mode_rwpt.samples, fine_ppb, device, duration_years,
-        fine_kernel_radius_px, modeConstants.resolution_m,
+        deposit_points_per_axis, modeConstants.resolution_m,
     )
     inj_min_C = float(fine_cfg.injectionTemp_C.min().item())
     inj_max_C = float(fine_cfg.injectionTemp_C.max().item())
@@ -1562,31 +1591,30 @@ def run_rwpt_thermal_prior(
             if is_final_level:
                 level_cfg = fine_cfg
             else:
-                # Same Courant-based selection as the fine level, but at this level's
-                # own (coarser) resolution and capped at coarse_steps rather than
-                # mode_rwpt.steps: a coarser spatial grid has physically larger pixels,
-                # so it typically needs far fewer steps for the same Courant target.
+                # Cost knobs scaled down by this level's own fraction of the full grid --
+                # a pure optimization (see the docstring above), not part of the
+                # correctness story: the acceptance iteration would still converge with
+                # the fine level's full samples/steps everywhere, just more slowly.
+                level_fraction = acceptance_grid_fractions[level_idx]
+                level_steps_cap = max(1, round(int(mode_rwpt.steps) * level_fraction))
+                level_samples = max(min_coarse_samples, round(int(mode_rwpt.samples) * level_fraction))
+
                 required_level_steps = _min_steps_for_courant(
                     level_vField_m_per_year, level_resolution_m_per_px, duration_years,
                     modeConstants.porosity_frac, retardation_dimless, target_courant,
                 )
-                level_steps_used = min(coarse_steps, required_level_steps)
-                level_ppb = max(1, numHps_count) * coarse_samples
-                level_time_step_s = (duration_years * SECONDS_PER_YEAR_S) / float(level_steps_used)
-                level_kernel_radius_px = _resolve_kernel_radius_px(
-                    level_vField_m_per_year, level_resolution_m_per_px, level_time_step_s
-                )
+                level_steps_used = min(level_steps_cap, required_level_steps)
+                level_ppb = max(1, numHps_count) * level_samples
                 level_cfg, _ = _build_config(
-                    modeConstants, numHps_count, level_steps_used, coarse_samples, level_ppb, device,
-                    duration_years, level_kernel_radius_px, level_resolution_m_per_px,
+                    modeConstants, numHps_count, level_steps_used, level_samples, level_ppb, device,
+                    duration_years, deposit_points_per_axis, level_resolution_m_per_px,
                 )
 
             log.info(
                 f"RWPT acceptance level {level_idx}/{len(grid_levels_px) - 1}: "
                 f"{level_h}x{level_w} px (dx={level_resolution_m_per_px:.2f} m), "
                 f"{level_cfg.samplesPerSource_count} samples/source, "
-                f"{level_cfg.timeSteps_count} steps, deposit_kernel_radius={level_cfg.depositKernelRadius_px} px "
-                f"(max={max_deposit_kernel_radius_px} px), max_iters={acceptance_grid_max_iters[level_idx]}"
+                f"{level_cfg.timeSteps_count} steps, max_iters={acceptance_grid_max_iters[level_idx]}"
             )
 
             viz_stem = f"L{level_idx:02d}_{level_h}x{level_w}"
@@ -1666,7 +1694,7 @@ def run_rwpt_thermal_prior(
         f"RWPT thermal prior: min={normalizedMap_dimless.min():.3f}, "
         f"max={normalizedMap_dimless.max():.3f}, mean={normalizedMap_dimless.mean():.4f}"
     )
-    return torch.clamp(normalizedMap_dimless, min=0.0, max=1.0)
+    return torch.clamp(normalizedMap_dimless, min=0.0, max=1.0), tempMap_C
 
 
 # --- PHYSICAL VALIDATION AND UNIT TESTS ---

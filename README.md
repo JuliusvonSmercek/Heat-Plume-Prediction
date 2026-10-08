@@ -110,7 +110,7 @@ Full option list: `settings/template.yaml`.
 python -m unittest discover -s tests
 ```
 
-Covers config parse, step2 APIs / tiny RWPT, U-Net train+infer, and minimal seasonal / steady-state pipelines via `settings/seasonal-test.yaml` and `settings/steady-state-test.yaml`. Seasonal smoke runs step1→2→3 on CPU; steady-state smoke runs step1 only on CPU (2560^2 / 100 HPs, full step2/3 needs CUDA). Pipeline tests expect the DaRUS datasets under `datasets/`.
+Covers config parse, step2 APIs / tiny RWPT, U-Net train+infer, and minimal seasonal / steady-state pipelines via `settings/test-seasonal.yaml` and `settings/test-steady-state-large.yaml`. Seasonal smoke runs step1→2→3 on CPU; steady-state smoke runs step1 only on CPU (2560^2 / 100 HPs, full step2/3 needs CUDA). Pipeline tests expect raw datasets under `datasets_raw` (see those YAMLs).
 
 ### VampireMan data conversion
 

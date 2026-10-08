@@ -52,10 +52,15 @@ def training(args: dict):
         tmp_bool_cutouts=args["bool_cutouts"],
     )
 
+    # Test/eval and measurements.yaml always use batch size 1 (L∞ / per-sample metrics).
+    eval_batchsize = 1
+    train_batchsize = eval_batchsize if args["case"] == "test" else args["batchsize"]
     dataloaders = {}
-    dataloaders["train"] = construct_dataloader(args["batchsize"], datasets["train"], shuffle=True)
-    dataloaders["val"] = construct_dataloader(args["batchsize"], datasets["val"], shuffle=False)
-    dataloaders["test"] = construct_dataloader(args["batchsize"], datasets["test"], shuffle=False)
+    dataloaders["train"] = construct_dataloader(train_batchsize, datasets["train"], shuffle=args["case"] != "test")
+    dataloaders["val"] = construct_dataloader(
+        eval_batchsize if args["case"] == "test" else args["batchsize"], datasets["val"], shuffle=False
+    )
+    dataloaders["test"] = construct_dataloader(eval_batchsize, datasets["test"], shuffle=False)
 
     # visualize only inputs
     if args["visualize"]:

@@ -179,10 +179,14 @@ def normalize(dataset_path: Path, info: dict, total: int = None):
     """
     norm = NormalizeTransform(info)
     for input_file in tqdm((dataset_path / "Inputs").iterdir(), desc="Normalizing inputs", total=total):
+        if input_file.suffix != ".pt":
+            continue
         x = torch.load(input_file)
         x = norm(x, "Inputs")
         torch.save(x, input_file)
     for label_file in tqdm((dataset_path / "Labels").iterdir(), desc="Normalizing labels", total=total):
+        if label_file.suffix != ".pt":
+            continue
         y = torch.load(label_file)
         y = norm(y, "Labels")
         torch.save(y, label_file)

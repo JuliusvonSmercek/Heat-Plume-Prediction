@@ -9,7 +9,7 @@ import torch
 
 class TestStep2Apis(unittest.TestCase):
     def test_rwpt_entry_points(self):
-        from code.streamlines.calculation import streamline_rwpt as ds
+        from code.streamlines import streamline_rwpt as ds
 
         self.assertTrue(callable(ds.run_rwpt_thermal_prior))
         self.assertTrue(callable(ds.generate_physical_plumes))
@@ -19,7 +19,7 @@ class TestStep2Apis(unittest.TestCase):
         self.assertFalse(hasattr(ds, "SimulationConfig"))
 
     def test_rwpt_config_and_tiny_rwpt(self):
-        from code.streamlines.calculation.streamline_rwpt import (
+        from code.streamlines.streamline_rwpt import (
             RwptConfig,
             generate_physical_plumes,
         )
@@ -37,7 +37,7 @@ class TestStep2Apis(unittest.TestCase):
             injectionTemp_C=temps,
             timeSteps_count=steps,
             timeEnd_years=1.0,
-            seasonalCycleSteps=steps,
+            seasonalCycleSteps_count=steps,
             samplesPerSource_count=2,
             porosity_frac=0.25,
             rockDensity_kg_per_m3=2650.0,
@@ -49,6 +49,8 @@ class TestStep2Apis(unittest.TestCase):
             thicknessAquifer_m=10.0,
             longitudinalDispersivity_m=1.0,
             transverseDispersivityH_m=0.1,
+            particles_per_batch_count=2,
+            depositPointsPerAxis_count=3,
         )
         self.assertGreater(config.timeStep_s, 0.0)
         self.assertGreater(config.retardationFactor_dimless, 1.0)
@@ -57,7 +59,7 @@ class TestStep2Apis(unittest.TestCase):
         vx = torch.ones((h, w), dtype=torch.float32, device=device)
         vy = torch.zeros((h, w), dtype=torch.float32, device=device)
         try:
-            out = generate_physical_plumes(config, hp, vx, vy, (w, h))
+            out = generate_physical_plumes(config, hp, vx, vy, (h, w))
         except Exception as exc:  # noqa: BLE001 — smoke test; environment may lack CUDA kernels
             self.skipTest(f"RWPT smoke skipped: {exc}")
         self.assertEqual(tuple(out.shape), (h, w))

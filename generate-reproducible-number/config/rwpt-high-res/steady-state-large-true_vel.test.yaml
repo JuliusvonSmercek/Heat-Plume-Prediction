@@ -1,0 +1,100 @@
+run_configuration:
+  run_name: steady-state-large-true_vel
+  dataset: steady-state-large
+  seed: 2406
+  device: cuda:0
+  use_velocity_model: false
+
+  pipeline:
+    - step3: test
+
+general_configuration:
+  step1:
+    datapoints:
+      validation: [0]
+      test: [1]
+      train: [2]
+    general:
+      epochs: 100
+      visualize: false
+      visualize_epochs: false
+    scheduler:
+      type: ReduceLROnPlateau
+      init_lr: 1e-4
+      mode: min
+      factor: 0.2
+      patience: 10
+      threshold: 1e-3
+      min_lr: 1e-6
+    model_parameters:
+      network: unet
+      inputs: [p, k, i]
+      outputs: [x, y]
+      batchsize: 20
+      kernel_size: 3
+      depth: 4
+      init_features: 32
+      stride: 1
+      dilation: 1
+      norm: batchnorm
+      repeat_inner: false
+      skip_per_dir: 16
+      len_box: 256
+      train_loss: MSE
+      bool_cutouts: true
+      optimizer_switch: false
+      optimizer: AdamW
+      activation: LeakyReLU
+
+  step2:
+    rwpt:
+      samples: 200000
+      steps: 10000
+    physical_parameters:
+      duration_years: 27.5
+      thickness_aquifer_m: 5.4
+      longitudinal_dispersivity_m: 4.75
+      transverse_dispersivity_h_m: 0.475
+      include: ../physical_parameters-steady-state.yaml
+
+  step3:
+    datapoints:
+      train: [0]
+      validation: [1]
+      test: [2]
+    general:
+      epochs: 100
+      visualize: false
+      visualize_epochs: false
+    scheduler:
+      type: ReduceLROnPlateau
+      init_lr: 1e-3
+      mode: min
+      factor: 0.2
+      patience: 10
+      threshold: 1e-3
+      min_lr: 1e-6
+    model_parameters:
+      network: unet
+      inputs: [p, k, i, x, y, 7]
+      outputs: [t]
+      batchsize: 1
+      kernel_size: 3
+      depth: 3
+      init_features: 64
+      stride: 1
+      dilation: 1
+      norm: batchnorm # instancenorm, groupnorm
+      repeat_inner: false
+      skip_per_dir: 8
+      len_box: 256
+      train_loss: Huber
+      bool_cutouts: false
+      optimizer_switch: false
+      optimizer: AdamW
+      activation: LeakyReLU
+
+paths:
+  datasets_raw: ../../datasets
+  datasets_prep: generate-reproducible-number/results/rwpt-high-res/steady-state-large-true_vel/data_prep
+  results: generate-reproducible-number/results/rwpt-high-res

@@ -26,12 +26,14 @@ class DatasetBasis(Dataset):
         self.input_names = []
         self.label_names = []
         for filename in os.listdir(self.path / "Inputs"):
-            self.input_names.append(filename)
+            if filename.endswith(".pt"):
+                self.input_names.append(filename)
         for filename in os.listdir(self.path / "Labels"):
-            self.label_names.append(filename)
+            if filename.endswith(".pt"):
+                self.label_names.append(filename)
         self.input_names.sort()
         self.label_names.sort()
-        self.spatial_size = torch.load(self.path / "Labels" / self.input_names[0]).shape[1:]
+        self.spatial_size = torch.load(self.path / "Labels" / self.label_names[0]).shape[1:]
         if box_size is not None:
             self.box_size = box_size
         else:

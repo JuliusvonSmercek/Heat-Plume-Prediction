@@ -1,0 +1,109 @@
+# Config for converted DaRUS full_dataset (step-3 scaled domain, 2560x2560).
+# Convert with: python -m code.convert_npz_dataset --src datasets/full_dataset-raw --out datasets/full_dataset
+# Physical params / injection cycle: 10×73 samples/year (+ wrap), ambient=10 C,
+# abs T ≈ [4.998, 15.002] C, flow_scale=0.0005 (see conversion_info.yaml).
+# Step2 sample counts kept low: many injection wells per RUN (up to ~2300).
+# datapoints are 0-based indices into sorted RUN_* ids (not raw Sim IDs).
+run_configuration:
+  run_name: full_dataset
+  dataset: full_dataset
+  seed: 2406
+  device: cuda:3
+  use_velocity_model: false
+
+  pipeline:
+    - clean: results-step2
+    - step2: run
+    - clean: results-step3
+    - step3: train
+
+general_configuration:
+  step1:
+    datapoints:
+      train: [0, 1, 2]
+      validation: [3]
+      test: [13, 14, 15, 16]
+    general:
+      epochs: 1
+      visualize: false  # full 2560² fields OOM on A100-40GB during viz/val batches
+      visualize_epochs: false
+    scheduler:
+      type: ReduceLROnPlateau
+      init_lr: 1e-4
+      mode: min
+      factor: 0.2
+      patience: 10
+      threshold: 1e-3
+      min_lr: 1e-6
+    model_parameters:
+      network: unet
+      inputs: [p, k, i]
+      outputs: [x, y]
+      batchsize: 4
+      kernel_size: 5
+      depth: 4
+      init_features: 32
+      stride: 1
+      dilation: 1
+      norm: batchnorm
+      repeat_inner: false
+      skip_per_dir: 16
+      len_box: 256
+      train_loss: MSE
+      bool_cutouts: true
+      optimizer_switch: false
+      optimizer: Adam
+      activation: ReLU
+
+  step2:
+    rwpt:
+      samples: 1
+      steps: 1000
+    physical_parameters:
+      duration_years: 10.0
+      thickness_aquifer_m: 1.0
+      longitudinal_dispersivity_m: 1.0
+      transverse_dispersivity_h_m: 0.1
+      include: ./physical_parameters-seasonal-10_0C.yaml
+
+  step3:
+    datapoints:
+      train: [0, 1, 2, 3, 4, 5, 6, 7]
+      validation: [8, 9, 10, 11, 12]
+      test: [13, 14, 15, 16]
+    general:
+      epochs: 3
+      visualize: false  # avoid full-field viz OOM on 2560²
+      visualize_epochs: false
+    scheduler:
+      type: ReduceLROnPlateau
+      init_lr: 1e-3
+      mode: min
+      factor: 0.2
+      patience: 10
+      threshold: 1e-3
+      min_lr: 1e-6
+    model_parameters:
+      network: unet
+      inputs: [p, k, i, x, y, 7]
+      outputs: [t]
+      batchsize: 4
+      kernel_size: 3
+      depth: 3
+      init_features: 64
+      stride: 1
+      dilation: 1
+      norm: batchnorm
+      repeat_inner: false
+      skip_per_dir: 8
+      len_box: 256
+      train_loss: Huber
+      bool_cutouts: true
+      optimizer_switch: false
+      optimizer: AdamW
+      activation: LeakyReLU
+
+paths:
+  datasets_raw: ../../datasets
+  datasets_prep: ./datasets_prep
+  results: ./results

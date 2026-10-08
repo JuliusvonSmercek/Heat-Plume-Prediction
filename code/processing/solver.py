@@ -268,11 +268,18 @@ class Solver:
 
         with torch.no_grad():
             for case, dataloader in dataloaders.items():
-                norm = dataloader.dataset.norm
+                # Enforce batch size 1 so L∞ / PAT / SSIM are per-sample then averaged.
+                eval_loader = DataLoader(
+                    dataloader.dataset,
+                    batch_size=1,
+                    shuffle=False,
+                    num_workers=0,
+                )
+                norm = eval_loader.dataset.norm
                 metrics[case] = {m: [] for m in EVAL_METRIC_NAMES}
                 pat_loss = None
 
-                for x, y in dataloader:
+                for x, y in eval_loader:
                     x, y = x.to(device), y.to(device)
                     y_pred = self.model(x)
 

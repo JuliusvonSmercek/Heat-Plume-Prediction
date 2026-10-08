@@ -1,18 +1,12 @@
 run_configuration:
-  run_name: steady-state
-  dataset: dataset_giant_100hp_varyK
+  run_name: steady-state-large-pred_vel
+  dataset: steady-state-large
   seed: 2406
-  device: cuda:3
-  use_velocity_model: false
+  device: cuda:0
+  use_velocity_model: true
 
   pipeline:
-    # - clean: data_prep
-    - clean: results-step1
-    - step1: train
-    - clean: results-step2
-    - step2: run
-    # - clean: results-step3
-    # - step3: train
+    - step3: test
 
 general_configuration:
   step1:
@@ -21,9 +15,9 @@ general_configuration:
       test: [1]
       train: [2]
     general:
-      epochs: 1
-      visualize: true
-      visualize_epochs: true
+      epochs: 100
+      visualize: false
+      visualize_epochs: false
     scheduler:
       type: ReduceLROnPlateau
       init_lr: 1e-4
@@ -37,7 +31,7 @@ general_configuration:
       inputs: [p, k, i]
       outputs: [x, y]
       batchsize: 20
-      kernel_size: 5
+      kernel_size: 3
       depth: 4
       init_features: 32
       stride: 1
@@ -57,30 +51,11 @@ general_configuration:
       samples: 200000
       steps: 10000
     physical_parameters:
-      resolution_m: 5.0
       duration_years: 27.5
-      porosity_frac: 0.25
-      rock_density_kg_per_m3: 2800.0
-      rock_specific_heat_J_per_kgK: 2000.0
-      water_density_kg_per_m3: 1000.0
-      water_specific_heat_J_per_kgK: 4180.0
-      thermal_conductivity_dry_W_per_mK: 0.65
-      thermal_conductivity_wet_W_per_mK: 1.0
-      thickness_aquifer_m: 5.0
-      longitudinal_dispersivity_m: 5.0
-      transverse_dispersivity_h_m: 0.5
-      ambient_temperature_C: 10.6
-      temperature_spread_C: 5.0
-      injection_temperature_C:
-        time_unit: year
-        values:
-          0.0: 15.6
-          1.0: 15.6
-      injection_rate_m3_per_s:
-        time_unit: year
-        values:
-          0.0: 0.00024
-          1.0: 0.00024
+      thickness_aquifer_m: 5.4
+      longitudinal_dispersivity_m: 4.75
+      transverse_dispersivity_h_m: 0.475
+      include: ../physical_parameters-steady-state.yaml
 
   step3:
     datapoints:
@@ -88,9 +63,9 @@ general_configuration:
       validation: [1]
       test: [2]
     general:
-      epochs: 300
-      visualize: true
-      visualize_epochs: true
+      epochs: 100
+      visualize: false
+      visualize_epochs: false
     scheduler:
       type: ReduceLROnPlateau
       init_lr: 1e-3
@@ -103,7 +78,7 @@ general_configuration:
       network: unet
       inputs: [p, k, i, x, y, 7]
       outputs: [t]
-      batchsize: 20
+      batchsize: 1
       kernel_size: 3
       depth: 3
       init_features: 64
@@ -114,12 +89,12 @@ general_configuration:
       skip_per_dir: 8
       len_box: 256
       train_loss: Huber
-      bool_cutouts: true
+      bool_cutouts: false
       optimizer_switch: false
       optimizer: AdamW
       activation: LeakyReLU
 
 paths:
-  datasets_raw: ../../temp/datasets
-  datasets_prep: ./datasets_prep
-  results: ./results
+  datasets_raw: ../../datasets
+  datasets_prep: generate-reproducible-number/results/rwpt-high-res/steady-state-large-pred_vel/data_prep
+  results: generate-reproducible-number/results/rwpt-high-res

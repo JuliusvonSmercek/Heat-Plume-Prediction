@@ -15,9 +15,9 @@ Extracts one calendar year (73 steps + endpoint at t=1.0 y) for
 
 Example
 -------
-python code/injection_series_to_yaml.py \\
-  --temp datasets/full_dataset/general/temperature_injection_series.csv \\
-  --flow datasets/full_dataset/general/normed_flow_injection_series.csv \\
+python code/injection_series_to_yaml.py \
+  --temp datasets/full_dataset/general/temperature_injection_series.csv \
+  --flow datasets/full_dataset/general/normed_flow_injection_series.csv \
   --year 0
 """
 
@@ -30,7 +30,7 @@ import numpy as np
 
 DEFAULT_AMBIENT_C = 10.0
 # DaRUS normed flow (~1–7) -> physical injection rate [m³/s].
-NORMED_FLOW_SCALE = 0.0005
+NORMED_FLOW_SCALE = 0.0024
 # Injection series: 73 samples per calendar year (not 20 from 18.25 d field dt).
 DEFAULT_STEPS_PER_YEAR = 73
 
@@ -112,13 +112,15 @@ def extract_year_cycle(
 
     times = np.linspace(0.0, 1.0, n_steps + 1)
     temp_abs = ambient_c + temp_delta[start:end]
-    rate_m3_s = flow_norm[start:end] * flow_scale
+    flow_window = flow_norm[start:end]
+    norm_factor = np.max(np.abs(flow_window))
+    rate_m3_s = (flow_window / norm_factor) * flow_scale if norm_factor > 0 else np.zeros_like(flow_window)
     return times, temp_abs, rate_m3_s
 
 
 def format_values_block(times: np.ndarray, values: np.ndarray, indent: int = 10) -> str:
     sp = " " * indent
-    return "\n".join(f"{sp}{t:.5f}: {v:.10g}" for t, v in zip(times, values, strict=True))
+    return "\n".join(f"{sp}{t:.5f}: {f'{v:.10f}'.rstrip('0').rstrip('.') or '0'}" for t, v in zip(times, values, strict=True))
 
 
 def format_yaml_fragment(
@@ -220,8 +222,8 @@ def main() -> None:
         f"# From {args.temp.name} + {args.flow.name}\n"
         f"# year={year}, ambient={args.ambient} C, steps/year={n_steps}, "
         f"flow_scale={args.flow_scale}\n"
-        f"# ΔT series range [{temp_delta.min():.4g}, {temp_delta.max():.4g}] C → "
-        f"abs temp [{temp_abs.min():.4g}, {temp_abs.max():.4g}] C, "
+        f"# ΔT series range [{temp_delta.min():.8f}, {temp_delta.max():.8f}] C → "
+        f"abs temp [{temp_abs.min():.8f}, {temp_abs.max():.8f}] C, "
         f"rate [{rate.min():.4g}, {rate.max():.4g}] m^3/s\n"
     )
     text = header + fragment

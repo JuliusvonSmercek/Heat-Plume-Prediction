@@ -38,11 +38,11 @@ class TestHoptConfigParse(unittest.TestCase):
     def test_seasonal_pflotran_hopt_space(self):
         from code.utils.yaml_parser import parse_config
 
-        config = parse_config(str(ROOT / "settings" / "seasonal_pflotran-dataset.yaml"))
+        config = parse_config(str(ROOT / "settings" / "seasonal_hopt.yaml"))
         hopt = config.general_configuration.step3.hopt_parameters
         self.assertIsNotNone(hopt)
         self.assertEqual(hopt.n_trials, 40)
-        self.assertEqual(hopt.kernel_size, [3, 5, 7])
+        self.assertEqual(hopt.kernel_size, [3, 5])
         self.assertEqual(hopt.depth, [2, 3, 4])
         self.assertEqual(hopt.init_features, [32, 64, 128])
         self.assertTrue(any(action.get("step3") == "hopt" for action in config.run_configuration.pipeline))
@@ -53,7 +53,7 @@ class TestHoptTrialFolders(unittest.TestCase):
         from code.processing.cnn_main import step_cnn
         from code.utils.yaml_parser import parse_config
 
-        config = parse_config(str(ROOT / "settings" / "seasonal_pflotran-dataset.yaml"))
+        config = parse_config(str(ROOT / "settings" / "seasonal_hopt.yaml"))
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             config.paths.results = tmp_path / "results"

@@ -4,6 +4,7 @@ from code.preprocessing.preprocessing import preprocessing
 from code.preprocessing.transforms import NormalizeTransform
 from code.processing.networks.unetVariants import UNet
 from code.streamlines.environment_pre import (
+    compare_temperature_fields,
     extract_heat_pump_positions,
     load_velocity_field,
     run_visualization,
@@ -21,6 +22,7 @@ from code.utils.utils_args import get_data_prep_path, load_yaml, make_data_prep_
 from code.utils.yaml_parser import AppConfig, SimulationStepConfig, convert_injection_config
 from pathlib import Path
 from typing import Any
+import numpy as np
 import torch
 from torch.nn import Module
 from tqdm import tqdm
@@ -69,7 +71,7 @@ def process_single_datapoint(
     dims = inputs_merged[step3_map["i"]].shape
 
     viz_dir = results_path / run_path.stem / "rwpt"
-    thermal_prior: torch.Tensor = run_rwpt_thermal_prior(
+    thermal_prior, thermal_prior_C = run_rwpt_thermal_prior(
         step2_config.rwpt,
         step2_config.physical_parameters,
         heat_pump_pos.clone(),
@@ -121,6 +123,38 @@ def process_single_datapoint(
         temperature_spread_C=phys.temperature_spread_C,
     )
     save_result(destination_path, run_id, inputs_merged, streamlines, norm_after, step3_map, step2_map)
+
+    # Prior vs GT: save physical °C binaries + absolute-difference figure + metrics
+    labels_path = destination_path / "Labels" / run_id
+    if not labels_path.is_file():
+        labels_path = destination_path / "Labels" / f"{run_path.stem}.pt"
+    gt_labels = torch.load(labels_path).clone()
+    norm_before.reverse(gt_labels, "Labels")
+    gt_temp_C = gt_labels[0].detach().cpu().numpy().astype(np.float32, copy=False)
+    prior_temp_C = thermal_prior_C.detach().cpu().numpy().astype(np.float32, copy=False)
+
+    run_results_dir = results_path / run_path.stem
+    run_results_dir.mkdir(parents=True, exist_ok=True)
+    prior_npy = run_results_dir / "thermal_prior_C.npy"
+    gt_npy = run_results_dir / "temperature_true_C.npy"
+    np.save(prior_npy, prior_temp_C)
+    np.save(gt_npy, gt_temp_C)
+    log.info(f"Saved thermal prior (°C): {prior_npy}")
+    log.info(f"Saved ground-truth temperature (°C): {gt_npy}")
+
+    compare_out = run_results_dir / "thermal_prior_vs_true.png"
+    metrics = compare_temperature_fields(
+        prior_temp_C,
+        gt_temp_C,
+        title_a="Thermal prior [C]",
+        title_b="Ground truth [C]",
+        out_path=compare_out,
+    )
+    print(f"shape: {metrics['shape']}")
+    print(f"MAE:     {metrics['mae']:.6g}")
+    print(f"RMSE:    {metrics['rmse']:.6g}")
+    print(f"max|Δ|:  {metrics['max_abs']:.6g}")
+    print(f"wrote:   {compare_out}")
 
     log.info(f"Finished {run_id} in {time.time() - start_time:.2f}s")
 
@@ -250,3 +284,4 @@ def execute_streamline_pipeline(config: AppConfig, mode: str) -> None:
             step1_map=step1_outputs_map,
             device=device,
         )
+        # exit()

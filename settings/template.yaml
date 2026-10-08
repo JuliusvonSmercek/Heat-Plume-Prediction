@@ -247,6 +247,6 @@ general_configuration:
       activation: [ReLU, Tanh, Sigmoid, LeakyReLU]
 
 paths:
-  datasets_raw: ../datasets                 # Directory containing raw input data
+  datasets_raw: ../../datasets                 # Directory containing raw input data
   datasets_prep: ../datasets_prep           # Directory for preprocessed intermediate data
   results: ../results                       # Output directory for logs, models, and predictions
