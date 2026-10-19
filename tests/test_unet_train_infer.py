@@ -54,6 +54,8 @@ class TestUnetTrainInfer(unittest.TestCase):
                 patience=2,
                 threshold=1e-3,
                 min_lr=1e-6,
+                weight_decay=1e-4,
+                early_stop_patience_multiplier=2,
             ),
         }
         # Solver.train always visualizes; skip I/O that needs real DataPoint norms.
@@ -71,6 +73,20 @@ class TestUnetTrainInfer(unittest.TestCase):
 
         self.assertEqual(tuple(pred.shape), (1, cout, h, w))
         self.assertTrue(torch.isfinite(pred).all())
+
+    def test_train_order_independent_of_global_rng(self):
+        """A seeded training loader keeps its shuffle order when other code draws from the global RNG."""
+        from code.preprocessing.data_init import construct_dataloader
+
+        ds = TensorDataset(torch.arange(32.0))
+
+        def first_epoch_order(extra_draws: int) -> list[float]:
+            torch.manual_seed(0)
+            torch.rand(extra_draws)  # e.g. DataLoader passes for plots
+            loader = construct_dataloader(4, ds, shuffle=True, seed=2406)
+            return [v for (batch,) in loader for v in batch.tolist()]
+
+        self.assertEqual(first_epoch_order(0), first_epoch_order(5))
 
 
 if __name__ == "__main__":

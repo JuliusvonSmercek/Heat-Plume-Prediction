@@ -25,15 +25,17 @@ general_configuration:
       validation: [1]
       test: [1]
     general:
-      epochs: 1
       visualize: false
       visualize_epochs: false
-    scheduler:
-      type: ReduceLROnPlateau
+    training:
+      epochs: 1
+      scheduler: ReduceLROnPlateau
       init_lr: 1e-4
+      weight_decay: 0.05
       mode: min
       factor: 0.2
       patience: 10
+      early_stop_patience_multiplier: 2
       threshold: 1e-3
       min_lr: 1e-6
     model_parameters:
@@ -57,9 +59,10 @@ general_configuration:
       activation: ReLU
 
   step2:
-    rwpt:
+    general:
+      visualize: true
       samples: 8
-      steps: 4
+      max_steps_per_day: 0.0004
     physical_parameters:
       resolution_m: 5.0
       duration_years: 27.5
@@ -92,15 +95,17 @@ general_configuration:
       validation: [1]
       test: [1]
     general:
-      epochs: 1
       visualize: false
       visualize_epochs: false
-    scheduler:
-      type: ReduceLROnPlateau
+    training:
+      epochs: 1
+      scheduler: ReduceLROnPlateau
       init_lr: 1e-3
+      weight_decay: 0.05
       mode: min
       factor: 0.2
       patience: 10
+      early_stop_patience_multiplier: 2
       threshold: 1e-3
       min_lr: 1e-6
     model_parameters:

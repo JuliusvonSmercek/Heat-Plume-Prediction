@@ -89,6 +89,7 @@ from tqdm import tqdm
 
 from code.postprocessing.visualization import visualize_rwpt_fields
 from code.utils import logging as log  # noqa: F401
+from code.utils.timing import TIMER
 
 # convert_injection_config tiles a 1-year periodic profile across the multi-year
 # duration and linearly interpolates it onto the solve grid. Returns
@@ -104,48 +105,8 @@ SECONDS_PER_YEAR_S: float = 365.25 * 24.0 * 3600.0
 # on the neighbouring nodes, where the outward flux is resolved.
 SEED_RADIUS_PX: float = 1.0
 
-# --------------------------------------------------------------------------------- #
-# Acceptance-iteration defaults (overridable via mode_rwpt attributes)
-# --------------------------------------------------------------------------------- #
-# Sample count used for every grid level except the final (full-resolution) one.
-# Floor on the fraction-scaled sample count at a coarse level (see run_rwpt_thermal_prior)
-# so an aggressive acceptance_grid_fractions entry combined with a modest fine `samples`
-# can't collapse to too few particles to be statistically meaningful.
-DEFAULT_MIN_COARSE_SAMPLES: int = 1_000
-# Break a stage once the worst overshoot beyond the physical band drops below this (C).
-# Larger -> stop sooner (cheaper, looser); smaller -> iterate longer chasing the bound.
-DEFAULT_CONVERGENCE_THRESHOLD_C: float = 0.05
-# Under-relaxation of the acceptance update in (0, 1]. <1 damps the upstream->downstream
-# oscillation (suppressing a cell cools everything downstream of it). 0.7 is stable.
-DEFAULT_ACCEPTANCE_RELAXATION: float = 0.7
-# Gaussian blur (px, in that level's own pixel units) applied to the acceptance field so
-# its suppressed/unsuppressed boundary isn't ragged -- the true acceptance field is smooth.
-DEFAULT_ACCEPTANCE_BLUR_PX: float = 1.0
-
-# Multi-resolution acceptance solve: grid size at each level, as a fraction of the full
-# (fine) grid in each dimension, and the max self-consistent iterations to spend at each
-# level before moving on (last entry applies to the full-resolution level). If
-# acceptance_grid_max_iters is shorter than acceptance_grid_fractions, its last value is
-# repeated to fill the remaining levels.
-# DEFAULT_ACCEPTANCE_GRID_FRACTIONS: list[float] = [0.030625, 0.06125, 0.125, 0.25, 0.5, 1.0]
-# DEFAULT_ACCEPTANCE_GRID_MAX_ITERS: list[int] = [32, 16, 8, 4, 2, 1]
-DEFAULT_ACCEPTANCE_GRID_FRACTIONS: list[float] = [1.0]
-DEFAULT_ACCEPTANCE_GRID_MAX_ITERS: list[int] = [1]
-
-# Deposit kernel: number of Gauss-Hermite quadrature points per axis (longitudinal,
-# transverse) used to represent each particle's anisotropic Gaussian transition kernel
-# (see deposit_energy_quadrature / the module docstring). 2 matches the kernel's mean
-# and variance exactly (cheapest: 2^2=4 points/particle/step); 3 additionally matches
-# skewness/kurtosis (9 points) and is a good default. Unlike the old radius-based patch
-# kernel (deposit_energy_gaussian), this cost does NOT depend on sigma, so it needs no
-# per-grid-level tuning as the multi-resolution driver moves across resolutions.
+# Default for the low-level deposit API; the pipeline sets it from step2.general (SimulationGeneral).
 DEFAULT_DEPOSIT_QUADRATURE_POINTS: int = 2
-
-# Target thermal Courant number (Co = |v_T|_max * dt / dx) used to pick the step count
-# automatically. Co <= 1 means particles don't cross more than one cell per step near
-# the fastest-flowing wells; raise this only if you deliberately want to allow more
-# per-step smearing there in exchange for fewer steps.
-DEFAULT_TARGET_COURANT: float = 1.0
 
 
 @dataclass
@@ -1158,13 +1119,14 @@ def _gaussian_blur_hw(img_hw: torch.Tensor, sigma_px: float) -> torch.Tensor:
 
 @dataclass
 class _RwptVizSpec:
-    """Destination and physical-band metadata for per-stage diagnostic PNGs."""
+    """Destination and physical-band metadata for per-stage diagnostic plot specs."""
 
     out_dir: Path
     ambient_temp_C: float
     min_temp_C: float
     max_temp_C: float
     temp_spread_C: float
+    render: bool = True  # also draw the PNG, not only npy+yaml
 
 
 def _save_rwpt_viz(
@@ -1181,20 +1143,22 @@ def _save_rwpt_viz(
 ) -> None:
     if viz is None:
         return
-    visualize_rwpt_fields(
-        viz.out_dir / stem,
-        title,
-        ambient_temp_C=viz.ambient_temp_C,
-        min_temp_C=viz.min_temp_C,
-        max_temp_C=viz.max_temp_C,
-        temp_spread_C=viz.temp_spread_C,
-        resolution_m_per_px=resolution_m_per_px,
-        temp_C=temp_C,
-        acceptance=acceptance,
-        acceptance_next=acceptance_next,
-        velocity_m_per_year=velocity_m_per_year,
-        wells_rowcol_px=wells_rowcol_px,
-    )
+    with TIMER.section("visualization"):
+        visualize_rwpt_fields(
+            viz.out_dir / stem,
+            title,
+            ambient_temp_C=viz.ambient_temp_C,
+            min_temp_C=viz.min_temp_C,
+            max_temp_C=viz.max_temp_C,
+            temp_spread_C=viz.temp_spread_C,
+            resolution_m_per_px=resolution_m_per_px,
+            temp_C=temp_C,
+            acceptance=acceptance,
+            acceptance_next=acceptance_next,
+            velocity_m_per_year=velocity_m_per_year,
+            wells_rowcol_px=wells_rowcol_px,
+            render=viz.render,
+        )
 
 
 def _overshoot_beyond_band_C(tempMap_C: torch.Tensor, min_temp_C: float, max_temp_C: float) -> float:
@@ -1298,10 +1262,11 @@ def _run_acceptance_stage(
     overshoot_C = float("inf")
     for it in range(max_iters):
         acc_used_hw = acceptance_hw
-        tempMap_C = generate_physical_plumes(
-            config, heatPumpPositions_px, None, None, dims_px,
-            acceptance_hw=acceptance_hw, tag=f"{tag} it{it}", vField_m_per_year=vField_m_per_year,
-        )
+        with TIMER.section("rwpt_solve"):
+            tempMap_C = generate_physical_plumes(
+                config, heatPumpPositions_px, None, None, dims_px,
+                acceptance_hw=acceptance_hw, tag=f"{tag} it{it}", vField_m_per_year=vField_m_per_year,
+            )
         overshoot_C = _overshoot_beyond_band_C(tempMap_C, min_temp_C, max_temp_C)
         worst_row_idx, worst_col_idx = _argmax_overshoot_cell(tempMap_C, min_temp_C, max_temp_C)
         log.info(
@@ -1312,9 +1277,10 @@ def _run_acceptance_stage(
         converged = overshoot_C < threshold_C
         acc_next_hw = None
         if not converged:
-            acceptance_hw = _update_acceptance(
-                acceptance_hw, tempMap_C, ambient_temp_C, min_temp_C, max_temp_C, relaxation, blur_sigma_px
-            )
+            with TIMER.section("acceptance_update"):
+                acceptance_hw = _update_acceptance(
+                    acceptance_hw, tempMap_C, ambient_temp_C, min_temp_C, max_temp_C, relaxation, blur_sigma_px
+                )
             acc_next_hw = acceptance_hw
         _save_rwpt_viz(
             viz,
@@ -1428,6 +1394,7 @@ def run_rwpt_thermal_prior(
     vy_m_per_year: torch.Tensor,
     dims_px: tuple[int, int],
     viz_dir: Path | None = None,
+    render: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Multi-resolution self-consistent thermal prior.
 
@@ -1442,8 +1409,8 @@ def run_rwpt_thermal_prior(
 
     Step counts are chosen automatically per level from the thermal Courant number
     (see _min_steps_for_courant), each capped at that level's own step cost ceiling --
-    `steps` for the final level, `round(steps * acceptance_grid_fractions[level])` for
-    every other level (a coarser, physically-larger-pixel level needs proportionally
+    `max_steps` (``max_steps_per_day`` × simulated days) for the final level, `round(max_steps * acceptance_grid_fractions[level])`
+    for every other level (a coarser, physically-larger-pixel level needs proportionally
     fewer steps for the same Courant target anyway, so this cap mostly just mirrors what
     the Courant condition already gives; it's a ceiling that's never exceeded, not a
     floor). Sample count per level is scaled the same way -- `round(samples *
@@ -1453,35 +1420,10 @@ def run_rwpt_thermal_prior(
     This is a cost optimization, not part of the correctness story: it just avoids
     spending the fine level's full sample/step budget at every coarser level too.
 
-    Tunable via mode_rwpt attributes (defaults in parentheses):
-        samples                       -- fine (final-level) sample count; scaled by
-                                          acceptance_grid_fractions[level] at coarser levels
-        steps                         -- fine (final-level) time steps, as a MAX; scaled by
-                                          acceptance_grid_fractions[level] at coarser levels
-        target_courant                (1.0)         -- Courant number the step-count
-                                                        selection targets
-        min_coarse_samples            (1_000)       -- floor on the fraction-scaled
-                                                        sample count at non-final levels
-        acceptance_grid_fractions     ([0.1, 0.3, 1.0])  -- grid size per level, as a
-                                                             fraction of the full grid
-        acceptance_grid_max_iters     ([4, 4, 3])    -- max iterations per level (last
-                                                          value repeats if shorter than
-                                                          acceptance_grid_fractions)
-        convergence_threshold_C       (0.05)
-        acceptance_relaxation         (0.7)
-        acceptance_blur_px            (1.0)
-        particles_per_batch           (5_000_000)   -- for the final level; non-final
-                                                        levels run in a single batch sized
-                                                        to fit all their (few) samples
-        deposit_points_per_axis       (3)           -- Gauss-Hermite quadrature points
-                                                        per axis for deposit_energy_quadrature
-                                                        (see the module docstring's Deposit
-                                                        kernel section); fixed cost, same
-                                                        value used at every grid level --
-                                                        no per-level tuning needed, unlike
-                                                        the old kernel-radius approach
+    Tunable fields come from the YAML ``step2.general`` block (``code.utils.yaml_parser.SimulationGeneral``),
+    which also defines their defaults.
 
-    If viz_dir is set, a PNG is written at the start of each grid level (coarse |q| +
+    If viz_dir is set, a plot spec (npy+yaml per panel, PNG too if ``render``) is written at the start of each grid level (coarse |q| +
     warm-started acceptance) and after every acceptance iteration (temp prior,
     acceptance, overshoot), plus the post-clamp field. Tests omit viz_dir and skip I/O.
 
@@ -1495,32 +1437,27 @@ def run_rwpt_thermal_prior(
     device = heatPumpPositions_px.device
     numHps_count = len(heatPumpPositions_px)
     duration_years = modeConstants.duration_years
+    max_steps = mode_rwpt.max_steps(duration_years)
 
     ambient_temp_C = modeConstants.ambient_temperature_C
     temp_spread_C = modeConstants.temperature_spread_C
 
-    # Iteration controls
-    min_coarse_samples = int(getattr(mode_rwpt, "min_coarse_samples", DEFAULT_MIN_COARSE_SAMPLES))
-    threshold_C = float(getattr(mode_rwpt, "convergence_threshold_C", DEFAULT_CONVERGENCE_THRESHOLD_C))
-    relaxation = float(getattr(mode_rwpt, "acceptance_relaxation", DEFAULT_ACCEPTANCE_RELAXATION))
-    blur_px = float(getattr(mode_rwpt, "acceptance_blur_px", DEFAULT_ACCEPTANCE_BLUR_PX))
-    fine_ppb = int(getattr(mode_rwpt, "particles_per_batch", 5_000_000))
-    deposit_points_per_axis = int(
-        getattr(mode_rwpt, "deposit_points_per_axis", DEFAULT_DEPOSIT_QUADRATURE_POINTS)
-    )
+    # Iteration controls (yaml step2.general — see yaml_parser.SimulationGeneral defaults)
+    min_coarse_samples = int(mode_rwpt.min_coarse_samples)
+    threshold_C = float(mode_rwpt.convergence_threshold_C)
+    relaxation = float(mode_rwpt.acceptance_relaxation)
+    blur_px = float(mode_rwpt.acceptance_blur_px)
+    fine_ppb = int(mode_rwpt.particles_per_batch)
+    deposit_points_per_axis = int(mode_rwpt.deposit_points_per_axis)
 
-    acceptance_grid_fractions = list(
-        getattr(mode_rwpt, "acceptance_grid_fractions", DEFAULT_ACCEPTANCE_GRID_FRACTIONS)
-    )
-    acceptance_grid_max_iters = list(
-        getattr(mode_rwpt, "acceptance_grid_max_iters", DEFAULT_ACCEPTANCE_GRID_MAX_ITERS)
-    )
+    acceptance_grid_fractions = list(mode_rwpt.acceptance_grid_fractions)
+    acceptance_grid_max_iters = list(mode_rwpt.acceptance_grid_max_iters)
     if len(acceptance_grid_max_iters) < len(acceptance_grid_fractions):
         acceptance_grid_max_iters = acceptance_grid_max_iters + [acceptance_grid_max_iters[-1]] * (
             len(acceptance_grid_fractions) - len(acceptance_grid_max_iters)
         )
 
-    target_courant = float(getattr(mode_rwpt, "target_courant", DEFAULT_TARGET_COURANT))
+    target_courant = float(mode_rwpt.target_courant)
 
     grid_h_px, grid_w_px = int(dims_px[0]), int(dims_px[1])
 
@@ -1530,7 +1467,7 @@ def run_rwpt_thermal_prior(
     retardation_dimless = _retardation_factor(modeConstants)
 
     # Steps needed to keep the thermal Courant number at target_courant at full
-    # resolution, capped at whatever the yaml configured as `steps` -- the yaml value is
+    # resolution, capped at `max_steps` (yaml `max_steps_per_day` × simulated days) -- that value is
     # a cost ceiling, never a floor: if the flow is slow enough that fewer steps already
     # satisfy the Courant condition, use fewer (cheaper for the same quality); if the
     # flow needs more than the yaml allows, cap at the yaml value rather than silently
@@ -1539,10 +1476,11 @@ def run_rwpt_thermal_prior(
         vField_full_m_per_year, modeConstants.resolution_m, duration_years,
         modeConstants.porosity_frac, retardation_dimless, target_courant,
     )
-    fine_steps_used = min(int(mode_rwpt.steps), required_fine_steps)
+    fine_steps_used = min(max_steps, required_fine_steps)
     log.info(
         f"RWPT fine steps: {required_fine_steps} needed for Courant<={target_courant:.2f} at full "
-        f"resolution (dx={modeConstants.resolution_m:.2f} m), yaml max={mode_rwpt.steps} -> using {fine_steps_used}"
+        f"resolution (dx={modeConstants.resolution_m:.2f} m), max_steps={max_steps} "
+        f"({mode_rwpt.max_steps_per_day:g}/day) -> using {fine_steps_used}"
     )
 
     # Fine (full-resolution) config, built once: it both solves the final level and
@@ -1553,8 +1491,10 @@ def run_rwpt_thermal_prior(
         modeConstants, numHps_count, fine_steps_used, mode_rwpt.samples, fine_ppb, device, duration_years,
         deposit_points_per_axis, modeConstants.resolution_m,
     )
-    inj_min_C = float(fine_cfg.injectionTemp_C.min().item())
-    inj_max_C = float(fine_cfg.injectionTemp_C.max().item())
+    # No heat pumps → no injection temperatures; the band collapses to ambient.
+    injection_C = fine_cfg.injectionTemp_C
+    inj_min_C = float(injection_C.min().item()) if injection_C.numel() else ambient_temp_C
+    inj_max_C = float(injection_C.max().item()) if injection_C.numel() else ambient_temp_C
     min_temp_C = min(inj_min_C, ambient_temp_C)
     max_temp_C = max(inj_max_C, ambient_temp_C)
     viz = None if viz_dir is None else _RwptVizSpec(
@@ -1563,6 +1503,7 @@ def run_rwpt_thermal_prior(
         min_temp_C=min_temp_C,
         max_temp_C=max_temp_C,
         temp_spread_C=temp_spread_C,
+        render=render,
     )
 
     if numHps_count == 0:
@@ -1575,95 +1516,99 @@ def run_rwpt_thermal_prior(
         tempMap_C = torch.full((grid_h_px, grid_w_px), ambient_temp_C, dtype=torch.float32)
 
         for level_idx, (level_h, level_w) in enumerate(grid_levels_px):
-            is_final_level = level_idx == len(grid_levels_px) - 1
-            level_vField_m_per_year = F.interpolate(
-                vField_full_m_per_year, size=(level_h, level_w), mode="bilinear", align_corners=True
-            )
-            # Same physical domain, fewer/more pixels -> proportionally larger/smaller
-            # physical pixel size. Averaging the h/w scale keeps it sane for a level
-            # whose rounded aspect ratio drifted slightly from the full grid's.
-            level_scale = 0.5 * (grid_h_px / level_h + grid_w_px / level_w)
-            level_resolution_m_per_px = modeConstants.resolution_m * level_scale
-            level_positions_px = _scale_positions_to_level(
-                heatPumpPositions_px, (grid_h_px, grid_w_px), (level_h, level_w)
-            ).to(device)
-
-            if is_final_level:
-                level_cfg = fine_cfg
-            else:
-                # Cost knobs scaled down by this level's own fraction of the full grid --
-                # a pure optimization (see the docstring above), not part of the
-                # correctness story: the acceptance iteration would still converge with
-                # the fine level's full samples/steps everywhere, just more slowly.
-                level_fraction = acceptance_grid_fractions[level_idx]
-                level_steps_cap = max(1, round(int(mode_rwpt.steps) * level_fraction))
-                level_samples = max(min_coarse_samples, round(int(mode_rwpt.samples) * level_fraction))
-
-                required_level_steps = _min_steps_for_courant(
-                    level_vField_m_per_year, level_resolution_m_per_px, duration_years,
-                    modeConstants.porosity_frac, retardation_dimless, target_courant,
+            with TIMER.section(f"level_{level_idx}"):
+                is_final_level = level_idx == len(grid_levels_px) - 1
+                level_vField_m_per_year = F.interpolate(
+                    vField_full_m_per_year, size=(level_h, level_w), mode="bilinear", align_corners=True
                 )
-                level_steps_used = min(level_steps_cap, required_level_steps)
-                level_ppb = max(1, numHps_count) * level_samples
-                level_cfg, _ = _build_config(
-                    modeConstants, numHps_count, level_steps_used, level_samples, level_ppb, device,
-                    duration_years, deposit_points_per_axis, level_resolution_m_per_px,
+                # Same physical domain, fewer/more pixels -> proportionally larger/smaller
+                # physical pixel size. Averaging the h/w scale keeps it sane for a level
+                # whose rounded aspect ratio drifted slightly from the full grid's.
+                level_scale = 0.5 * (grid_h_px / level_h + grid_w_px / level_w)
+                level_resolution_m_per_px = modeConstants.resolution_m * level_scale
+                level_positions_px = _scale_positions_to_level(
+                    heatPumpPositions_px, (grid_h_px, grid_w_px), (level_h, level_w)
+                ).to(device)
+
+                if is_final_level:
+                    level_cfg = fine_cfg
+                else:
+                    # Cost knobs scaled down by this level's own fraction of the full grid --
+                    # a pure optimization (see the docstring above), not part of the
+                    # correctness story: the acceptance iteration would still converge with
+                    # the fine level's full samples/steps everywhere, just more slowly.
+                    level_fraction = acceptance_grid_fractions[level_idx]
+                    level_steps_cap = max(1, round(max_steps * level_fraction))
+                    level_samples = max(min_coarse_samples, round(int(mode_rwpt.samples) * level_fraction))
+
+                    required_level_steps = _min_steps_for_courant(
+                        level_vField_m_per_year, level_resolution_m_per_px, duration_years,
+                        modeConstants.porosity_frac, retardation_dimless, target_courant,
+                    )
+                    level_steps_used = min(level_steps_cap, required_level_steps)
+                    level_ppb = max(1, numHps_count) * level_samples
+                    level_cfg, _ = _build_config(
+                        modeConstants, numHps_count, level_steps_used, level_samples, level_ppb, device,
+                        duration_years, deposit_points_per_axis, level_resolution_m_per_px,
+                    )
+
+                TIMER.note("grid_px", f"{level_h}x{level_w}")
+                TIMER.note("samples_per_source", int(level_cfg.samplesPerSource_count))
+                TIMER.note("time_steps", int(level_cfg.timeSteps_count))
+                log.info(
+                    f"RWPT acceptance level {level_idx}/{len(grid_levels_px) - 1}: "
+                    f"{level_h}x{level_w} px (dx={level_resolution_m_per_px:.2f} m), "
+                    f"{level_cfg.samplesPerSource_count} samples/source, "
+                    f"{level_cfg.timeSteps_count} steps, max_iters={acceptance_grid_max_iters[level_idx]}"
                 )
 
-            log.info(
-                f"RWPT acceptance level {level_idx}/{len(grid_levels_px) - 1}: "
-                f"{level_h}x{level_w} px (dx={level_resolution_m_per_px:.2f} m), "
-                f"{level_cfg.samplesPerSource_count} samples/source, "
-                f"{level_cfg.timeSteps_count} steps, max_iters={acceptance_grid_max_iters[level_idx]}"
-            )
-
-            viz_stem = f"L{level_idx:02d}_{level_h}x{level_w}"
-            _save_rwpt_viz(
-                viz,
-                f"{viz_stem}_grid",
-                (
-                    f"RWPT level {level_idx}/{len(grid_levels_px) - 1}: "
-                    f"coarse grid {level_h}x{level_w} px, warm-start acceptance "
-                    f"min={float(acceptance_hw.min()):.3f}"
-                ),
-                resolution_m_per_px=level_resolution_m_per_px,
-                wells_rowcol_px=level_positions_px,
-                acceptance=acceptance_hw,
-                velocity_m_per_year=level_vField_m_per_year,
-            )
-
-            tempMap_C, acceptance_hw = _run_acceptance_stage(
-                level_cfg, level_positions_px, level_vField_m_per_year, (level_h, level_w),
-                acceptance_hw, acceptance_grid_max_iters[level_idx], threshold_C, relaxation, blur_px,
-                ambient_temp_C, min_temp_C, max_temp_C, tag=f"L{level_idx}({level_h}x{level_w})",
-                viz=viz, viz_stem=viz_stem,
-            )
-
-            if not is_final_level:
-                next_h, next_w = grid_levels_px[level_idx + 1]
-                acceptance_hw = F.interpolate(
-                    acceptance_hw.view(1, 1, level_h, level_w), size=(next_h, next_w),
-                    mode="bilinear", align_corners=True,
-                ).view(next_h, next_w).clamp(0.0, 1.0)
+                viz_stem = f"L{level_idx:02d}_{level_h}x{level_w}"
                 _save_rwpt_viz(
                     viz,
-                    f"{viz_stem}_upsampled",
+                    f"{viz_stem}_grid",
                     (
-                        f"RWPT level {level_idx} acceptance upsampled to "
-                        f"{next_h}x{next_w} px (min={float(acceptance_hw.min()):.3f})"
+                        f"RWPT level {level_idx}/{len(grid_levels_px) - 1}: "
+                        f"coarse grid {level_h}x{level_w} px, warm-start acceptance "
+                        f"min={float(acceptance_hw.min()):.3f}"
                     ),
-                    resolution_m_per_px=modeConstants.resolution_m * 0.5 * (
-                        grid_h_px / next_h + grid_w_px / next_w
-                    ),
-                    wells_rowcol_px=_scale_positions_to_level(
-                        heatPumpPositions_px, (grid_h_px, grid_w_px), (next_h, next_w)
-                    ).to(device),
+                    resolution_m_per_px=level_resolution_m_per_px,
+                    wells_rowcol_px=level_positions_px,
                     acceptance=acceptance_hw,
-                    temp_C=F.interpolate(
-                        tempMap_C.view(1, 1, level_h, level_w), size=(next_h, next_w),
-                        mode="bilinear", align_corners=True,
-                    ).view(next_h, next_w),
+                    velocity_m_per_year=level_vField_m_per_year,
                 )
+
+                tempMap_C, acceptance_hw = _run_acceptance_stage(
+                    level_cfg, level_positions_px, level_vField_m_per_year, (level_h, level_w),
+                    acceptance_hw, acceptance_grid_max_iters[level_idx], threshold_C, relaxation, blur_px,
+                    ambient_temp_C, min_temp_C, max_temp_C, tag=f"L{level_idx}({level_h}x{level_w})",
+                    viz=viz, viz_stem=viz_stem,
+                )
+
+                if not is_final_level:
+                    next_h, next_w = grid_levels_px[level_idx + 1]
+                    acceptance_hw = F.interpolate(
+                        acceptance_hw.view(1, 1, level_h, level_w), size=(next_h, next_w),
+                        mode="bilinear", align_corners=True,
+                    ).view(next_h, next_w).clamp(0.0, 1.0)
+                    _save_rwpt_viz(
+                        viz,
+                        f"{viz_stem}_upsampled",
+                        (
+                            f"RWPT level {level_idx} acceptance upsampled to "
+                            f"{next_h}x{next_w} px (min={float(acceptance_hw.min()):.3f})"
+                        ),
+                        resolution_m_per_px=modeConstants.resolution_m * 0.5 * (
+                            grid_h_px / next_h + grid_w_px / next_w
+                        ),
+                        wells_rowcol_px=_scale_positions_to_level(
+                            heatPumpPositions_px, (grid_h_px, grid_w_px), (next_h, next_w)
+                        ).to(device),
+                        acceptance=acceptance_hw,
+                        temp_C=F.interpolate(
+                            tempMap_C.view(1, 1, level_h, level_w), size=(next_h, next_w),
+                            mode="bilinear", align_corners=True,
+                        ).view(next_h, next_w),
+                    )
 
     # --- Final clamp: absorb residual Monte-Carlo overshoot into the physical band ---
     residual_C = _overshoot_beyond_band_C(tempMap_C, min_temp_C, max_temp_C)

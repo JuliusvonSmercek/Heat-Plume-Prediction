@@ -1,5 +1,6 @@
 from code.processing.training import training
 from code.utils import logging as log  # noqa: F401
+from code.utils.timing import TIMER
 from code.utils.utils_args import save_yaml
 from code.utils.yaml_parser import HoptParameters, MLStepConfig, PhysicalParameters, Paths, RunConfiguration, UNetParameters
 
@@ -79,18 +80,19 @@ def step_cnn(
 ):
     args = {
         "case": mode,
+        "seed": run_configuration.seed,
         "model": paths.results / run_configuration.run_name / step_name,
-        "visualize": step_config.general.visualize,
         "visualize_epochs": step_config.general.visualize_epochs,
+        "render_images": step_config.general.visualize,
         "data_prep": paths.datasets_prep,
         "data_raw": paths.datasets_raw / run_configuration.dataset,
         "destination": paths.results / run_configuration.run_name / step_name,
-        "epochs": step_config.general.epochs,
+        "epochs": step_config.training.epochs,
         "datapoint_test": step_config.datapoints.test,
         "datapoint_validate": step_config.datapoints.validation,
         "datapoint_train": step_config.datapoints.train,
         "device": run_configuration.device,
-        "scheduler": step_config.scheduler,
+        "scheduler": step_config.training,
         "ambient_temperature_C": physical_parameters.ambient_temperature_C,
         "temperature_spread_C": physical_parameters.temperature_spread_C,
     }
@@ -116,8 +118,6 @@ def step_cnn(
         def run_hopt(trial: optuna.Trial) -> float:
             args_copy = args.copy()
             args_copy["case"] = "train"
-            # Keep YAML visualize so each trial can dump val/test pics under its folder
-            args_copy["visualize"] = step_config.general.visualize
 
             suggested = _suggest_hopt_params(trial, hopt)
             args_copy.update(suggested)
@@ -130,13 +130,15 @@ def step_cnn(
             save_yaml({"trial_number": trial.number, **suggested}, trial_dir / "trial_params.yaml")
             log.info(f"Trial {trial.number} → {trial_dir.name}")
 
-            val_loss = training(args_copy)
+            with TIMER.section("trial"):
+                val_loss = training(args_copy)
             save_yaml(
                 {"trial_number": trial.number, "val_loss": val_loss, **suggested},
                 trial_dir / "trial_result.yaml",
             )
             return float(val_loss)
 
+        TIMER.note("n_trials", hopt.n_trials)
         study.optimize(run_hopt, n_trials=hopt.n_trials)
 
         pruned_trials = study.get_trials(deepcopy=False, states=[TrialState.PRUNED])

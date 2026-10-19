@@ -21,15 +21,17 @@ general_configuration:
       validation: [17, 18, 19, 20, 21] # 19%
       test: [22, 23, 24, 25] # 15%
     general:
-      epochs: 100
       visualize: true
       visualize_epochs: true
-    scheduler:
-      type: ReduceLROnPlateau
+    training:
+      epochs: 100
+      scheduler: ReduceLROnPlateau
       init_lr: 1e-4
+      weight_decay: 0.05
       mode: min
       factor: 0.2
-      patience: 10
+      patience: 5
+      early_stop_patience_multiplier: 2
       threshold: 1e-3
       min_lr: 1e-6
     model_parameters:
@@ -53,14 +55,15 @@ general_configuration:
       activation: LeakyReLU
 
   step2:
-    rwpt:
+    general:
+      visualize: true
       samples: 200000
-      steps: 10000
+      max_steps_per_day: 1.0
     physical_parameters:
       duration_years: 27.5
-      thickness_aquifer_m: 5.4
-      longitudinal_dispersivity_m: 4.75
-      transverse_dispersivity_h_m: 0.475
+      thickness_aquifer_m: 5.0
+      longitudinal_dispersivity_m: 5.0
+      transverse_dispersivity_h_m: 0.5
       include: ./physical_parameters-steady-state.yaml
 
   step3:
@@ -69,15 +72,17 @@ general_configuration:
       validation: [17, 18, 19, 20, 21] # 19%
       test: [22, 23, 24, 25] # 15%
     general:
-      epochs: 100
       visualize: true
       visualize_epochs: true
-    scheduler:
-      type: ReduceLROnPlateau
+    training:
+      epochs: 100
+      scheduler: ReduceLROnPlateau
       init_lr: 1e-3
+      weight_decay: 0.05
       mode: min
       factor: 0.2
-      patience: 10
+      patience: 5
+      early_stop_patience_multiplier: 2
       threshold: 1e-3
       min_lr: 1e-6
     model_parameters:

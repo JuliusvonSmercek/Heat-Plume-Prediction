@@ -26,15 +26,17 @@ general_configuration:
       validation: [1]
       test: [2]
     general:
-      epochs: 1
       visualize: true  # full 2560² fields OOM on A100-40GB during viz/val batches
       visualize_epochs: true
-    scheduler:
-      type: ReduceLROnPlateau
+    training:
+      epochs: 1
+      scheduler: ReduceLROnPlateau
       init_lr: 1e-4
+      weight_decay: 0.05
       mode: min
       factor: 0.2
       patience: 10
+      early_stop_patience_multiplier: 2
       threshold: 1e-3
       min_lr: 1e-6
     model_parameters:
@@ -58,9 +60,10 @@ general_configuration:
       activation: ReLU
 
   step2:
-    rwpt:
+    general:
+      visualize: true
       samples: 10000
-      steps: 3000
+      max_steps_per_day: 0.82
     physical_parameters:
       duration_years: 10.0
       thickness_aquifer_m: 10.0
@@ -74,15 +77,17 @@ general_configuration:
       validation: [11, 12, 13, 14]
       test: [15, 16]
     general:
-      epochs: 1
       visualize: true
       visualize_epochs: true
-    scheduler:
-      type: ReduceLROnPlateau
+    training:
+      epochs: 1
+      scheduler: ReduceLROnPlateau
       init_lr: 1e-3
+      weight_decay: 0.05
       mode: min
       factor: 0.2
       patience: 10
+      early_stop_patience_multiplier: 2
       threshold: 1e-3
       min_lr: 1e-6
     model_parameters:

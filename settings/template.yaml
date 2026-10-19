@@ -21,22 +21,19 @@ general_configuration:
       test: [2, 3]                          # Indices of data points used for test
       train: [4, 5]                         # Indices of data points used for training
     general:
+      visualize: true                       # Plot specs (<name>.npy + <name>.yaml) are always written; true also renders images
+      visualize_epochs: true                # Extra plots after each improving epoch (rendered if visualize)
+    training:                               # Optimisation loop: epochs, LR schedule, early stopping
       epochs: 20                            # Number of training cycles
-      visualize: true                       # Enable generation of plot/visualizations after training
-      visualize_epochs: true                # Enable generation of plot/visualizations during training
-    scheduler:                              # Learning rate scheduler configuration
-      type: ReduceLROnPlateau               # Scheduler type
+      scheduler: ReduceLROnPlateau          # Scheduler type (only ReduceLROnPlateau is supported)
       init_lr: 1e-4                         # Initial learning rate
+      weight_decay: 0.05                    # Optimizer L2 regularization
       mode: min                             # Minimize the monitored metric
       factor: 0.2                           # Factor by which LR is reduced
-      patience: 10                          # Epochs to wait before reducing LR
-      threshold: 1e-3                       # Threshold for measuring new optimum
+      patience: 5                          # Epochs without improvement before reducing LR
+      early_stop_patience_multiplier: 2     # Early stopping after patience * multiplier epochs without improvement
+      threshold: 1e-3                       # Min. relative improvement (0.1 %); also used for best-epoch selection and early stopping
       min_lr: 1e-6                          # Lower bound for learning rate
-    # scheduler:                            # Alternative StepLR configuration (commented out)
-    #   init_lr: 0.01
-    #   type: StepLR
-    #   step_size: 100
-    #   gamma: 0.1
     model_parameters:                       # Neural Network configuration
       network: unet                         # Architecture type
       inputs: [p, k, i]                     # Input channels (Pressure, Permeability, Heatpump Location)
@@ -78,9 +75,20 @@ general_configuration:
       activation: [ReLU, Tanh, Sigmoid, LeakyReLU]
 
   step2:
-    rwpt:                           # RWPT thermal prior settings
+    general:                                # Step2 settings: visualization + RWPT thermal prior
+      visualize: true                       # Plot specs (<name>.npy + <name>.yaml) are always written; true also renders images
       samples: 150000                       # Number of particles/samples for RWPT
-      steps: 5000                           # Time steps for RWPT
+      max_steps_per_day: 0.5                # Max RWPT time steps per simulated day (Courant may use fewer); 1.0 ≈ 10k steps for 27.5 y
+      # Optional (defaults shown):
+      target_courant: 1.0                   # Thermal Courant target for the automatic step count (Co = |v_T|_max * dt / dx)
+      particles_per_batch: 5000000          # Particle batch size at the final (full-resolution) level
+      deposit_points_per_axis: 2            # Gauss-Hermite quadrature points per axis for the energy deposit
+      min_coarse_samples: 1000              # Floor on the scaled sample count at coarser acceptance grid levels
+      acceptance_relaxation: 0.7            # Under-relaxation of the acceptance update, in (0, 1]
+      acceptance_blur_px: 1.0               # Gaussian blur of the acceptance field (px of that level)
+      acceptance_grid_fractions: [1.0]      # Acceptance grid size per level as a fraction of the full grid, e.g. [0.25, 0.5, 1.0]
+      acceptance_grid_max_iters: [1]        # Max self-consistent iterations per level (last value repeats if shorter)
+      convergence_threshold_C: 0.05         # Stop iterating once the max overshoot beyond the physical band is below this (°C)
     physical_parameters:                    # Constants defining the physical environment
       resolution_m: 5.0                     # Grid resolution in meters
       duration_years: 27.5                  # Total simulation duration
@@ -91,9 +99,9 @@ general_configuration:
       water_specific_heat_J_per_kgK: 4180.0 # Specific heat capacity of water
       thermal_conductivity_dry_W_per_mK: 0.65 # Thermal conductivity of dry rock
       thermal_conductivity_wet_W_per_mK: 1.0 # Thermal conductivity of wet rock
-      thickness_aquifer_m: 1.0              # Aquifer vertical thickness
-      longitudinal_dispersivity_m: 1.0      # Dispersivity along flow direction
-      transverse_dispersivity_h_m: 0.1      # Dispersivity perpendicular to flow
+      thickness_aquifer_m: 5.0              # Aquifer vertical thickness
+      longitudinal_dispersivity_m: 5.0      # Dispersivity along flow direction
+      transverse_dispersivity_h_m: 0.5      # Dispersivity perpendicular to flow
       ambient_temperature_C: 10.6           # Background temperature
       temperature_spread_C: 5.0             # Temperature spread for heat pump
       injection_temperature_C:              # Time-variant Injection Temperature Profile
@@ -185,23 +193,20 @@ general_configuration:
       test: [2, 3]                          # Indices of data points used for test
       train: [4, 5]                         # Indices of data points used for training
     general:
-      epochs: 300
       visualize: true
       visualize_epochs: true
       model_path: temperature_model
-    scheduler:
-      type: ReduceLROnPlateau
+    training:
+      epochs: 100
+      scheduler: ReduceLROnPlateau
       init_lr: 1e-3
+      weight_decay: 0.05
       mode: min
       factor: 0.2
-      patience: 10
+      patience: 5
+      early_stop_patience_multiplier: 2
       threshold: 1e-3
       min_lr: 1e-6
-    # scheduler:                            # Alternative StepLR settings
-    #   type: StepLR
-    #   init_lr: 0.01
-    #   step_size: 100
-    #   gamma: 0.1
     model_parameters:
       network: unet
       inputs: [p, k, i, x, y, 7]

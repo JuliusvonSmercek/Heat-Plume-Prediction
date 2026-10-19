@@ -18,6 +18,19 @@ class TestConfigParse(unittest.TestCase):
         self.assertEqual(config.run_configuration.run_name, "template_name")
         self.assertTrue(any("step2" in action for action in config.run_configuration.pipeline))
         self.assertEqual(config.general_configuration.step2.physical_parameters.duration_years, 27.5)
+        self.assertTrue(config.general_configuration.step2.general.visualize)
+        self.assertEqual(config.general_configuration.step1.training.epochs, 20)
+
+
+    def test_training_fields_mandatory(self):
+        from code.utils.yaml_includes import load_yaml_with_includes
+        from code.utils.yaml_parser import MLStepConfig
+
+        step = load_yaml_with_includes(ROOT / "settings" / "template.yaml")["general_configuration"]["step1"]
+        for key in ("epochs", "weight_decay", "early_stop_patience_multiplier"):
+            training = {k: v for k, v in step["training"].items() if k != key}
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                MLStepConfig.model_validate({**step, "training": training})
 
 
 class TestYamlIncludes(unittest.TestCase):

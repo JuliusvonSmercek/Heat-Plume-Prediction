@@ -3,13 +3,15 @@ import logging
 import multiprocessing
 from code.postprocessing.visualization import visualize_inputs, visualize_outputs
 from code.preprocessing.data_init import construct_dataloader, init_data
-from code.preprocessing.datasets.dataset import DatasetType
+from code.preprocessing.datasets.dataset import DataPoint, DatasetType
+from code.preprocessing.datasets.dataset_cuts_jit import SimulationDatasetCuts
 from code.preprocessing.preprocessing import preprocessing
 from code.processing.loss_fcts import get_train_loss
 from code.processing.networks.convLSTM import Seq2Seq
 from code.processing.networks.unetVariants import UNet, UNetNoPad2
 from code.processing.solver import Solver
 from code.utils import logging as log  # noqa: F401
+from code.utils.timing import TIMER
 from code.utils.utils_args import (
     check_model_avail,
     get_data_prep_path,
@@ -20,6 +22,7 @@ from datetime import datetime
 from pathlib import Path
 
 import torch
+from torch.utils.data import DataLoader
 
 
 def get_dataset_type(info: dict, ambient_temperature_C: float) -> DatasetType:
@@ -40,30 +43,34 @@ def get_dataset_type(info: dict, ambient_temperature_C: float) -> DatasetType:
 def training(args: dict):
     multiprocessing.set_start_method("spawn", force=True)
 
-    args["data_prep"] = get_data_prep_path(args["data_prep"], args["inputs"], args["outputs"], args["data_raw"])
-    info = preprocessing(args)  # and save info.yaml in model folder
-    datasetType = get_dataset_type(info, args["ambient_temperature_C"])
+    with TIMER.section("preprocessing"):
+        args["data_prep"] = get_data_prep_path(args["data_prep"], args["inputs"], args["outputs"], args["data_raw"])
+        info = preprocessing(args)  # and save info.yaml in model folder
+        datasetType = get_dataset_type(info, args["ambient_temperature_C"])
 
-    input_channels, output_channels, datasets = init_data(
-        args,
-        datapoint_test=args["datapoint_test"],
-        datapoint_validate=args["datapoint_validate"],
-        datapoint_train=args["datapoint_train"],
-        tmp_bool_cutouts=args["bool_cutouts"],
-    )
+    with TIMER.section("data_loading"):
+        input_channels, output_channels, datasets = init_data(
+            args,
+            datapoint_test=args["datapoint_test"],
+            datapoint_validate=args["datapoint_validate"],
+            datapoint_train=args["datapoint_train"],
+            tmp_bool_cutouts=args["bool_cutouts"],
+        )
 
-    # Test/eval and measurements.yaml always use batch size 1 (L∞ / per-sample metrics).
-    eval_batchsize = 1
-    train_batchsize = eval_batchsize if args["case"] == "test" else args["batchsize"]
-    dataloaders = {}
-    dataloaders["train"] = construct_dataloader(train_batchsize, datasets["train"], shuffle=args["case"] != "test")
-    dataloaders["val"] = construct_dataloader(
-        eval_batchsize if args["case"] == "test" else args["batchsize"], datasets["val"], shuffle=False
-    )
-    dataloaders["test"] = construct_dataloader(eval_batchsize, datasets["test"], shuffle=False)
+        # Test/eval and measurements.yaml always use batch size 1 (L∞ / per-sample metrics).
+        eval_batchsize = 1
+        train_batchsize = eval_batchsize if args["case"] == "test" else args["batchsize"]
+        dataloaders = {}
+        dataloaders["train"] = construct_dataloader(
+            train_batchsize, datasets["train"], shuffle=args["case"] != "test", seed=args.get("seed")
+        )
+        dataloaders["val"] = construct_dataloader(
+            eval_batchsize if args["case"] == "test" else args["batchsize"], datasets["val"], shuffle=False
+        )
+        dataloaders["test"] = construct_dataloader(eval_batchsize, datasets["test"], shuffle=False)
 
-    # visualize only inputs
-    if args["visualize"]:
+    # visualize only inputs (plot specs always; images if render_images)
+    with TIMER.section("visualization_inputs"):
         visualize_inputs(
             datasetType,
             dataloaders["val"],
@@ -71,6 +78,7 @@ def training(args: dict):
             plot_path=args["destination"] / "val",
             amount_datapoints_to_visu=1,
             pic_format="png",
+            render=args.get("render_images", True),
         )
         visualize_inputs(
             datasetType,
@@ -79,6 +87,7 @@ def training(args: dict):
             plot_path=args["destination"] / "test",
             amount_datapoints_to_visu=1,
             pic_format="png",
+            render=args.get("render_images", True),
         )
 
     # Step 1
@@ -131,11 +140,12 @@ def training(args: dict):
                 repeat_inner=args["repeat_inner"],
             ).float()
 
-    model.to(args["device"])
+    with TIMER.section("model_load" if args["case"] in ["test", "finetune"] else "model_init"):
+        model.to(args["device"])
 
-    if args["case"] in ["test", "finetune"]:
-        check_model_avail(args)
-        model.load(args["model"], args["device"])
+        if args["case"] in ["test", "finetune"]:
+            check_model_avail(args)
+            model.load(args["model"], args["device"])
 
     is_pretrained = args["case"] in ["finetune", "test"]
     val_loss = 9e9
@@ -149,33 +159,43 @@ def training(args: dict):
             finetune=is_pretrained,
         )
         training_time = datetime.now()
-        try:
-            val_loss = solver.train(datasetType, dataloaders["train"], dataloaders["val"], args)
-        except KeyboardInterrupt:
-            if solver.best_model_params is not None:
-                logging.warning(
-                    f"Manually stopping training early with best model found in epoch {solver.best_model_params['epoch']}."
-                )
-                val_loss = solver.best_model_params["loss"]
-            else:
-                logging.warning("Manually stopping training early. No best model found yet.")
-        finally:
-            log.info("Training finished")
+        with TIMER.section("training"):
+            TIMER.note("max_epochs", args["epochs"])
+            TIMER.note("train_samples", len(datasets["train"]))
+            TIMER.note("val_samples", len(datasets["val"]))
+            try:
+                val_loss = solver.train(datasetType, dataloaders["train"], dataloaders["val"], args)
+            except KeyboardInterrupt:
+                if solver.best_model_params is not None:
+                    logging.warning(
+                        f"Manually stopping training early with best model found in epoch {solver.best_model_params['epoch']}."
+                    )
+                    val_loss = solver.best_model_params["loss"]
+                else:
+                    logging.warning("Manually stopping training early. No best model found yet.")
+            finally:
+                log.info("Training finished")
 
         # save model
         training_time = datetime.now() - training_time
-        model.save(args["destination"])
-        solver.save_metrics_separate_yaml(
-            dataloaders,
-            args["destination"],
-            args["device"],
-            {
-                "best_epoch": solver.best_model_params["epoch"] if solver.best_model_params is not None else -1,
-                "no_params": model.num_of_params(),
-                "max_epochs": args["epochs"],
-                "training_time": training_time.total_seconds(),
-            },
-        )
+        with TIMER.section("model_save"):
+            model.save(args["destination"])
+        # Evaluate the train split on full fields (not cutouts), like val/test
+        eval_dataloaders = dict(dataloaders)
+        if type(datasets["train"]) is SimulationDatasetCuts:
+            eval_dataloaders["train"] = DataLoader(DataPoint(args["data_prep"], i=args["datapoint_train"]), batch_size=1)
+        with TIMER.section("evaluation"):
+            solver.save_metrics_separate_yaml(
+                eval_dataloaders,
+                args["destination"],
+                args["device"],
+                {
+                    "best_epoch": solver.best_model_params["epoch"] if solver.best_model_params is not None else -1,
+                    "no_params": model.num_of_params(),
+                    "max_epochs": args["epochs"],
+                    "training_time": training_time.total_seconds(),
+                },
+            )
     elif args["case"] == "test":
         model.eval()
         loss = get_train_loss(args["train_loss"])
@@ -186,10 +206,11 @@ def training(args: dict):
             loss_func=loss,
             finetune=is_pretrained,
         )
-        solver.save_metrics_separate_yaml(dataloaders, args["destination"], args["device"], {})
+        with TIMER.section("evaluation"):
+            solver.save_metrics_separate_yaml(dataloaders, args["destination"], args["device"], {})
 
-    # postprocessing, visualize only outputs
-    if args["visualize"]:
+    # postprocessing, visualize only outputs (plot specs always; images if render_images)
+    with TIMER.section("visualization_outputs"):
         visualize_outputs(
             datasetType,
             model,
@@ -198,6 +219,7 @@ def training(args: dict):
             plot_path=args["destination"] / "val",
             amount_datapoints_to_visu=1,
             pic_format="png",
+            render=args.get("render_images", True),
         )
         visualize_outputs(
             datasetType,
@@ -207,6 +229,7 @@ def training(args: dict):
             plot_path=args["destination"] / "test",
             amount_datapoints_to_visu=1,
             pic_format="png",
+            render=args.get("render_images", True),
         )
 
     for key in ["train", "val", "test"]:

@@ -1,3 +1,4 @@
+/.pushover
 # private stuff
 .vscode/
 .venv
@@ -7,6 +8,8 @@
 /results
 /logs
 /generate-reproducible-number/results/
+/generate-reproducible-number/results_old/
+/generate-reproducible-number/paper_numbers.yaml
 /generate-reproducible-number/logs/
 
 # Latex

@@ -37,7 +37,7 @@ class TestSeasonalPipelineSmoke(unittest.TestCase):
         if not torch.cuda.is_available():
             config.run_configuration.device = "cpu"
 
-        def _cpu_safe_dataloader(batchsize: int, dataset, shuffle: bool = True):
+        def _cpu_safe_dataloader(batchsize: int, dataset, shuffle: bool = True, seed: int | None = None):
             return DataLoader(
                 dataset,
                 batch_size=min(len(dataset), batchsize),

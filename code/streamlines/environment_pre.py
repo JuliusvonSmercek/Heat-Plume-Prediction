@@ -5,79 +5,12 @@ from code.preprocessing.preprocessing import expand_property_names
 from code.preprocessing.transforms import NormalizeTransform
 from code.processing.networks.unetVariants import UNetNoPad2
 from code.utils import logging as log  # noqa: F401
+from code.utils.timing import TIMER
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from torch.nn import Module
-
-# Fixed color scale for the absolute-difference panel [°C]
-ABS_DIFF_VMIN = 0.0
-ABS_DIFF_VMAX = 2.0
-
-
-def compare_temperature_fields(
-    a: np.ndarray,
-    b: np.ndarray,
-    *,
-    title_a: str = "A",
-    title_b: str = "B",
-    out_path: Path,
-    abs_diff_vmin: float = ABS_DIFF_VMIN,
-    abs_diff_vmax: float = ABS_DIFF_VMAX,
-) -> dict[str, float]:
-    """Write a 1×3 figure (A, B, |A−B|) and return error metrics."""
-    a = np.squeeze(np.asarray(a, dtype=np.float64))
-    b = np.squeeze(np.asarray(b, dtype=np.float64))
-    if a.ndim != 2 or b.ndim != 2:
-        raise ValueError(f"Expected 2-D fields, got shapes {a.shape} and {b.shape}")
-    if a.shape != b.shape:
-        raise ValueError(f"Shape mismatch: {a.shape} vs {b.shape}")
-
-    abs_diff = np.abs(a - b)
-    mae = float(np.mean(abs_diff))
-    rmse = float(np.sqrt(np.mean((a - b) ** 2)))
-    max_abs = float(np.max(abs_diff))
-
-    vmin = float(min(a.min(), b.min()))
-    vmax = float(max(a.max(), b.max()))
-
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4.2), constrained_layout=True)
-    im0 = axes[0].imshow(a, origin="lower", vmin=vmin, vmax=vmax, cmap="coolwarm")
-    axes[0].set_title(title_a)
-    fig.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
-
-    im1 = axes[1].imshow(b, origin="lower", vmin=vmin, vmax=vmax, cmap="coolwarm")
-    axes[1].set_title(title_b)
-    fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
-
-    im2 = axes[2].imshow(
-        abs_diff, origin="lower", vmin=abs_diff_vmin, cmap="magma"
-    )
-    axes[2].set_title(f"|{title_a} − {title_b}|")
-    fig.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
-
-    for ax in axes:
-        ax.set_xlabel("x [px]")
-        ax.set_ylabel("y [px]")
-
-    out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=1600)
-    plt.close(fig)
-
-    metrics = {"mae": mae, "rmse": rmse, "max_abs": max_abs, "shape": a.shape}
-    metrics_path = out_path.with_suffix(".txt")
-    metrics_path.write_text(
-        f"shape: {metrics['shape']}\n"
-        f"MAE:     {metrics['mae']:.6g}\n"
-        f"RMSE:    {metrics['rmse']:.6g}\n"
-        f"max|Δ|:  {metrics['max_abs']:.6g}\n"
-        f"wrote:   {out_path}\n",
-        encoding="utf-8",
-    )
-    return metrics
 
 def load_velocity_field(
     run_id: str,
@@ -90,7 +23,7 @@ def load_velocity_field(
     """Loads velocity from disk or infers it using the step1 velocity model."""
     if use_model and model is not None:
         data_in = torch.load(origin_path / "Inputs" / run_id)
-        with torch.no_grad():
+        with torch.no_grad(), TIMER.section("step1_inference"):
             velocity = model(data_in.unsqueeze(0).to(device)).cpu().detach().squeeze(0)
     else:
         velocity = torch.load(origin_path / "Labels" / run_id)
@@ -147,8 +80,9 @@ def run_visualization(
     cells_size: list[float] | tuple[float, ...],
     ambient_temperature_C: float,
     temperature_spread_C: float,
+    render: bool = True,
 ) -> None:
-    """Generates plots for all streamlines."""
+    """Writes plot specs (and optionally images) for all streamlines."""
     results_path.mkdir(exist_ok=True, parents=True)
 
     for key, tensor_data in streamlines.items():
@@ -163,4 +97,5 @@ def run_visualization(
             cells_size=cells_size,
             ambient_temperature_C=ambient_temperature_C,
             temperature_spread_C=temperature_spread_C,
+            render=render,
         )

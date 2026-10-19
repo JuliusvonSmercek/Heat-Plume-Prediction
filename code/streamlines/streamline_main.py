@@ -1,10 +1,10 @@
 import time
+from code.postprocessing.visualization import write_prior_vs_true
 from code.preprocessing.datasets.dataset import DatasetType
 from code.preprocessing.preprocessing import preprocessing
 from code.preprocessing.transforms import NormalizeTransform
 from code.processing.networks.unetVariants import UNet
 from code.streamlines.environment_pre import (
-    compare_temperature_fields,
     extract_heat_pump_positions,
     load_velocity_field,
     run_visualization,
@@ -18,11 +18,12 @@ from code.streamlines.tensor_manipulation import (
     prepare_dataset_step3,
 )
 from code.utils import logging as log  # noqa: F401
+from code.utils.timing import TIMER
 from code.utils.utils_args import get_data_prep_path, load_yaml, make_data_prep_dir
 from code.utils.yaml_parser import AppConfig, SimulationStepConfig, convert_injection_config
 from pathlib import Path
 from typing import Any
-import numpy as np
+
 import torch
 from torch.nn import Module
 from tqdm import tqdm
@@ -30,6 +31,7 @@ from tqdm import tqdm
 
 def process_single_datapoint(
     run_path: Path,
+    source_path: Path,
     destination_path: Path,
     origin_data_path: Path,
     results_path: Path,
@@ -44,48 +46,55 @@ def process_single_datapoint(
     step1_map: dict[str, int],
     device: torch.device,
 ) -> None:
-    """For one datapoint: load velocity, run stochastic streamline priors + RWPT thermal field (step2), visualize, write step3 inputs."""
+    """For one datapoint: load velocity, run the RWPT thermal prior (step2), visualize, write step3 inputs.
+
+    Inputs and labels are read from ``source_path`` (step2 prep); the step3 input is written to ``destination_path``.
+    """
     run_id = run_path.name
     start_time = time.time()
 
     # 1. Load Data
-    velocity_field = load_velocity_field(run_id, origin_data_path, use_velocity_model, model, norm_v, device)
-    inputs: torch.Tensor = torch.load(destination_path / "Inputs" / run_id)
-    norm_before.reverse(inputs, "Inputs")
+    with TIMER.section("load_velocity"):
+        velocity_field = load_velocity_field(run_id, origin_data_path, use_velocity_model, model, norm_v, device)
+    with TIMER.section("load_inputs_and_geometry"):
+        inputs: torch.Tensor = torch.load(source_path / "Inputs" / run_id)
+        norm_before.reverse(inputs, "Inputs")
 
-    # 2. Geometry Prep
-    inputs_merged = crop_and_merge_tensors(
-        expand_input_dimensions(inputs, step2_map, step3_map),
-        velocity_field,
-        step1_map,
-        step3_map,
-    )
+        # 2. Geometry Prep
+        inputs_merged = crop_and_merge_tensors(
+            expand_input_dimensions(inputs, step2_map, step3_map),
+            velocity_field,
+            step1_map,
+            step3_map,
+        )
 
-    # 3. Physics Calculation
-    pos_hps_np = extract_heat_pump_positions(inputs_merged, step3_map["i"])
-    log.info(f"Processing {run_id}: {pos_hps_np.shape[0]} heat pumps detected.")
+        # 3. Physics Calculation
+        pos_hps_np = extract_heat_pump_positions(inputs_merged, step3_map["i"])
+        log.info(f"Processing {run_id}: {pos_hps_np.shape[0]} heat pumps detected.")
 
-    heat_pump_pos = torch.from_numpy(pos_hps_np).float().to(device)
-    vx_m_per_year = velocity_field[step1_map["x"]].float().t().to(device)
-    vy_m_per_year = velocity_field[step1_map["y"]].float().t().to(device)
-    dims = inputs_merged[step3_map["i"]].shape
+        heat_pump_pos = torch.from_numpy(pos_hps_np).float().to(device)
+        vx_m_per_year = velocity_field[step1_map["x"]].float().t().to(device)
+        vy_m_per_year = velocity_field[step1_map["y"]].float().t().to(device)
+        dims = inputs_merged[step3_map["i"]].shape
 
-    viz_dir = results_path / run_path.stem / "rwpt"
-    thermal_prior, thermal_prior_C = run_rwpt_thermal_prior(
-        step2_config.rwpt,
-        step2_config.physical_parameters,
-        heat_pump_pos.clone(),
-        vx_m_per_year,
-        vy_m_per_year,
-        dims,
-        viz_dir=viz_dir,
-    )
+    viz_dir = None  # RWPT stage plots off; results_path / run_path.stem / "rwpt" enables them
+    with TIMER.section("rwpt_thermal_prior"):
+        thermal_prior, thermal_prior_C = run_rwpt_thermal_prior(
+            step2_config.general,
+            step2_config.physical_parameters,
+            heat_pump_pos.clone(),
+            vx_m_per_year,
+            vy_m_per_year,
+            dims,
+            viz_dir=viz_dir,
+            render=step2_config.general.visualize,
+        )
 
     streamlines = {"7": thermal_prior}
 
     (temp, seasonalCycleSteps) = convert_injection_config(
         step2_config.physical_parameters.injection_temperature_C,
-        step2_config.rwpt.steps,
+        step2_config.general.max_steps(step2_config.physical_parameters.duration_years),
         step2_config.physical_parameters.duration_years,
         device,
     )
@@ -113,48 +122,47 @@ def process_single_datapoint(
 
     # 4. Visualize & Save
     phys = step2_config.physical_parameters
-    run_visualization(
-        datasetType,
-        streamlines,
-        results_path,
-        run_path.stem,
-        cells_size=norm_before.info["CellsSize"],
-        ambient_temperature_C=phys.ambient_temperature_C,
-        temperature_spread_C=phys.temperature_spread_C,
+    with TIMER.section("visualization_streamlines"):
+        run_visualization(
+            datasetType,
+            streamlines,
+            results_path,
+            run_path.stem,
+            cells_size=norm_before.info["CellsSize"],
+            ambient_temperature_C=phys.ambient_temperature_C,
+            temperature_spread_C=phys.temperature_spread_C,
+            render=step2_config.general.visualize,
+        )
+    with TIMER.section("save_step3_inputs"):
+        save_result(destination_path, run_id, inputs_merged, streamlines, norm_after, step3_map, step2_map)
+
+    # Prior vs GT (°C): three plot specs always (prior / true npy + yaml, |error| yaml with
+    # the metrics under meta); the images only if visualize.
+    with TIMER.section("save_prior_vs_true"):
+        labels_path = source_path / "Labels" / run_id
+        if not labels_path.is_file():
+            labels_path = source_path / "Labels" / f"{run_path.stem}.pt"
+        gt_labels = torch.load(labels_path).clone()
+        norm_before.reverse(gt_labels, "Labels")
+        spec_paths, metrics = write_prior_vs_true(
+            results_path / run_path.stem / "thermal_prior_vs_true",
+            thermal_prior_C,
+            gt_labels[0],
+            datasetType=datasetType,
+            cells_size=norm_before.info["CellsSize"],
+            ambient_temperature_C=phys.ambient_temperature_C,
+            temperature_spread_C=phys.temperature_spread_C,
+        )
+    log.info(
+        f"{run_id} prior vs true: MAE {metrics['mae_C']:.4g} C, RMSE {metrics['rmse_C']:.4g} C, "
+        f"max |error| {metrics['max_abs_C']:.4g} C ({spec_paths[-1]})"
     )
-    save_result(destination_path, run_id, inputs_merged, streamlines, norm_after, step3_map, step2_map)
+    if step2_config.general.visualize:
+        from code.plotting.render import render_panel
 
-    # Prior vs GT: save physical °C binaries + absolute-difference figure + metrics
-    labels_path = destination_path / "Labels" / run_id
-    if not labels_path.is_file():
-        labels_path = destination_path / "Labels" / f"{run_path.stem}.pt"
-    gt_labels = torch.load(labels_path).clone()
-    norm_before.reverse(gt_labels, "Labels")
-    gt_temp_C = gt_labels[0].detach().cpu().numpy().astype(np.float32, copy=False)
-    prior_temp_C = thermal_prior_C.detach().cpu().numpy().astype(np.float32, copy=False)
-
-    run_results_dir = results_path / run_path.stem
-    run_results_dir.mkdir(parents=True, exist_ok=True)
-    prior_npy = run_results_dir / "thermal_prior_C.npy"
-    gt_npy = run_results_dir / "temperature_true_C.npy"
-    np.save(prior_npy, prior_temp_C)
-    np.save(gt_npy, gt_temp_C)
-    log.info(f"Saved thermal prior (°C): {prior_npy}")
-    log.info(f"Saved ground-truth temperature (°C): {gt_npy}")
-
-    compare_out = run_results_dir / "thermal_prior_vs_true.png"
-    metrics = compare_temperature_fields(
-        prior_temp_C,
-        gt_temp_C,
-        title_a="Thermal prior [C]",
-        title_b="Ground truth [C]",
-        out_path=compare_out,
-    )
-    print(f"shape: {metrics['shape']}")
-    print(f"MAE:     {metrics['mae']:.6g}")
-    print(f"RMSE:    {metrics['rmse']:.6g}")
-    print(f"max|Δ|:  {metrics['max_abs']:.6g}")
-    print(f"wrote:   {compare_out}")
+        with TIMER.section("visualization_compare"):
+            for spec_path in spec_paths:
+                render_panel(spec_path)
 
     log.info(f"Finished {run_id} in {time.time() - start_time:.2f}s")
 
@@ -227,27 +235,30 @@ def execute_streamline_pipeline(config: AppConfig, mode: str) -> None:
     step3_in, step3_out = gen_conf.step3.model_parameters.inputs, gen_conf.step3.model_parameters.outputs
 
     # Preprocessing
-    step1_dir = _run_preprocessing(step1_in, step1_out, prep_path, dataset_path, results_path)
-    step2_dir = _run_preprocessing(step2_in, step2_out, prep_path, dataset_path, results_path)
+    with TIMER.section("preprocessing"):
+        step1_dir = _run_preprocessing(step1_in, step1_out, prep_path, dataset_path, results_path)
+        step2_dir = _run_preprocessing(step2_in, step2_out, prep_path, dataset_path, results_path)
 
     # Initialization
     device = torch.device(run_conf.device)
-    model, velocity_dir = initialize_velocity_model(config, device, run_conf.use_velocity_model, step1_dir)
+    with TIMER.section("velocity_model_load"):
+        model, velocity_dir = initialize_velocity_model(config, device, run_conf.use_velocity_model, step1_dir)
 
     # Dataset Preparation Step 3
     step3_dir = get_data_prep_path(prep_path, "".join(step3_in), "".join(step3_out), dataset_path)
-    prepare_dataset_step3(
-        step2_dir,
-        step3_dir,
-        velocity_dir,
-        run_conf.use_velocity_model,
-        run_conf.dataset,
-        step1_in,
-        step1_out,
-        step2_in,
-        step3_in,
-        step3_out,
-    )
+    with TIMER.section("prepare_dataset_step3"):
+        prepare_dataset_step3(
+            step2_dir,
+            step3_dir,
+            velocity_dir,
+            run_conf.use_velocity_model,
+            run_conf.dataset,
+            step1_in,
+            step1_out,
+            step2_in,
+            step3_in,
+            step3_out,
+        )
 
     # Normalization & Mappings
     norm_v = NormalizeTransform(load_yaml(velocity_dir / "info.yaml"))
@@ -267,21 +278,24 @@ def execute_streamline_pipeline(config: AppConfig, mode: str) -> None:
     log.info(f"Starting streamline calculation for {len(files)} items.")
     files.sort(key=lambda x: x.name)
 
+    TIMER.note("datapoints", len(files))
+    TIMER.note("use_velocity_model", bool(run_conf.use_velocity_model))
     for run_path in tqdm(files, desc="Calculating Streamlines"):
-        process_single_datapoint(
-            run_path=run_path,
-            destination_path=step3_dir,
-            origin_data_path=step1_dir,
-            results_path=results_path,
-            step2_config=gen_conf.step2,
-            use_velocity_model=run_conf.use_velocity_model,
-            model=model,
-            norm_v=norm_v,
-            norm_before=norm_before,
-            norm_after=norm_after,
-            step3_map=step3_inputs_map,
-            step2_map=step2_inputs_map,
-            step1_map=step1_outputs_map,
-            device=device,
-        )
-        # exit()
+        with TIMER.section("datapoint"):
+            process_single_datapoint(
+                run_path=run_path,
+                source_path=step2_dir,
+                destination_path=step3_dir,
+                origin_data_path=step1_dir,
+                results_path=results_path,
+                step2_config=gen_conf.step2,
+                use_velocity_model=run_conf.use_velocity_model,
+                model=model,
+                norm_v=norm_v,
+                norm_before=norm_before,
+                norm_after=norm_after,
+                step3_map=step3_inputs_map,
+                step2_map=step2_inputs_map,
+                step1_map=step1_outputs_map,
+                device=device,
+            )

@@ -45,7 +45,7 @@ class TestSteadyStatePipelineSmoke(unittest.TestCase):
                 {"step1": "train"},
             ]
 
-        def _cpu_safe_dataloader(batchsize: int, dataset, shuffle: bool = True):
+        def _cpu_safe_dataloader(batchsize: int, dataset, shuffle: bool = True, seed: int | None = None):
             return DataLoader(
                 dataset,
                 batch_size=min(len(dataset), batchsize),

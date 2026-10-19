@@ -1,5 +1,6 @@
 import gc
 import logging
+import os
 import time
 from code.postprocessing.visualization import visualize_outputs
 from code.preprocessing.datasets.dataset import DatasetType
@@ -13,6 +14,7 @@ from code.processing.networks.convLSTM import Seq2Seq
 from code.processing.networks.convLSTM import weights_init as convlstm_weights_init
 from code.processing.networks.model import weights_init as model_weights_init
 from code.utils import logging as log  # noqa: F401
+from code.utils.timing import TIMER
 from code.utils.utils_args import save_yaml
 from copy import deepcopy
 from dataclasses import dataclass
@@ -22,21 +24,36 @@ import torch
 from torch import manual_seed
 from torch.nn import HuberLoss, Module, modules
 from torch.optim import SGD, Adam, AdamW, Optimizer
-from torch.optim.lr_scheduler import ReduceLROnPlateau, StepLR
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-# Optimizer L2 regularization (not YAML-configurable).
-DEFAULT_WEIGHT_DECAY: float = 1e-4
-EARLY_STOP_MIN_DELTA: float = 1e-6
-EARLY_STOP_PATIENCE_MULTIPLIER: int = 2
+
+def is_improvement(loss: float, best: float, mode: str, threshold: float) -> bool:
+    """Same rule as ReduceLROnPlateau (threshold_mode="rel"): better than ``best`` by more than ``threshold`` relative."""
+    if mode == "max":
+        return loss > best * (1 + threshold)
+    return loss < best * (1 - threshold)
+
 
 _OPTIMIZERS: dict[str, type[Optimizer]] = {
     "adam": Adam,
     "adamw": AdamW,
     "sgd": SGD,
 }
+
+
+def _tqdm_kwargs(**defaults) -> dict:
+    """Progress-bar defaults that ``TQDM_<NAME>`` environment variables can override.
+
+    tqdm applies ``TQDM_*`` env vars only to arguments that are not passed explicitly, so
+    drop our default whenever the matching env var is set (``TQDM_NCOLS`` also drops
+    ``dynamic_ncols``). E.g. ``TQDM_DISABLE=1`` or ``TQDM_NCOLS=80`` for tmux / log files.
+    """
+    if "TQDM_NCOLS" in os.environ:
+        defaults.pop("dynamic_ncols", None)
+    return {k: v for k, v in defaults.items() if f"TQDM_{k.upper()}" not in os.environ}
 
 
 def resolve_optimizer(name: str | type[Optimizer]) -> type[Optimizer]:
@@ -87,43 +104,45 @@ class Solver:
 
         log.info(f"Total Parameters: {total_params:,}, Trainable: {trainable_params:,}")
 
-        epochs = tqdm(range(args["epochs"]), "CNN Training Epochs", dynamic_ncols=True, unit="epoch", leave=True)
+        epochs = tqdm(
+            range(args["epochs"]), "CNN Training Epochs", unit="epoch", **_tqdm_kwargs(dynamic_ncols=True, leave=True)
+        )
         self.best_model_params = None
 
         # Assume noisy data
         scheduler = args["scheduler"]
+        improvement_mode, improvement_threshold = scheduler.mode, scheduler.threshold
+        early_stop_patience = scheduler.patience * scheduler.early_stop_patience_multiplier
         optimizer_cls = resolve_optimizer(args["optimizer"])
         self.opt = optimizer_cls(
-            self.model.parameters(), lr=scheduler.init_lr, weight_decay=DEFAULT_WEIGHT_DECAY
+            self.model.parameters(), lr=scheduler.init_lr, weight_decay=scheduler.weight_decay
         )
-        log.info(f"Optimizer: {optimizer_cls.__name__} (weight_decay={DEFAULT_WEIGHT_DECAY})")
+        log.info(f"Optimizer: {optimizer_cls.__name__} (weight_decay={scheduler.weight_decay})")
 
-        if scheduler.type == "ReduceLROnPlateau":
-            scheduler = ReduceLROnPlateau(
-                self.opt,
-                mode=scheduler.mode,
-                factor=scheduler.factor,
-                patience=scheduler.patience,
-                threshold=scheduler.threshold,
-                min_lr=scheduler.min_lr,
-            )
-        elif scheduler.type == "StepLR":
-            scheduler = StepLR(self.opt, step_size=scheduler.step_size, gamma=scheduler.gamma)
-        else:
-            raise ValueError(f"Unknown scheduler type: {args['scheduler'].type}")
+        scheduler = ReduceLROnPlateau(
+            self.opt,
+            mode=scheduler.mode,
+            factor=scheduler.factor,
+            patience=scheduler.patience,
+            threshold=scheduler.threshold,
+            min_lr=scheduler.min_lr,
+        )
 
-        early_stop_patience = scheduler.patience * EARLY_STOP_PATIENCE_MULTIPLIER
         early_stop_counter = 0
 
         try:
             for epoch in epochs:
+                epoch_start = time.perf_counter()
+                TIMER.note("epochs_run", epoch + 1)
                 # Training
-                self.model.train()
-                train_epoch_loss, other_losses_train = self.run_epoch(train_dataloader, device)
+                with TIMER.section("epoch_train_pass"):
+                    self.model.train()
+                    train_epoch_loss, other_losses_train = self.run_epoch(train_dataloader, device)
 
                 # Validation — keep eval mode (including BatchNorm running stats)
-                self.model.eval()
-                val_epoch_loss, other_losses_val = self.run_epoch(val_dataloader, device)
+                with TIMER.section("epoch_val_pass"):
+                    self.model.eval()
+                    val_epoch_loss, other_losses_val = self.run_epoch(val_dataloader, device)
 
                 scheduler.step(val_epoch_loss)
 
@@ -140,16 +159,22 @@ class Solver:
                 epochs.set_postfix_str(
                     f"train loss: {train_epoch_loss:.2e}, val loss: {val_epoch_loss:.2e}, lr: {current_lr:.1e}"
                 )
+                log.info(
+                    f"Epoch {epoch + 1}/{args['epochs']}: train loss {train_epoch_loss:.3e}, "
+                    f"val loss {val_epoch_loss:.3e}, lr {current_lr:.1e}, {time.perf_counter() - epoch_start:.1f} s"
+                )
 
-                # Keep best model
-                if self.best_model_params is None or val_epoch_loss < (self.best_model_params["loss"] - EARLY_STOP_MIN_DELTA):
+                # Keep best model (same relative threshold as the LR scheduler)
+                if self.best_model_params is None or is_improvement(
+                    val_epoch_loss, self.best_model_params["loss"], improvement_mode, improvement_threshold
+                ):
                     self.best_model_params = {
                         "epoch": epoch,
                         "loss": val_epoch_loss,
                         "train loss": train_epoch_loss,
                         "val_loss": val_epoch_loss,
-                        "state_dict": self.model.state_dict(),
-                        "optimizer": self.opt.state_dict(),
+                        "state_dict": deepcopy(self.model.state_dict()),
+                        "optimizer": deepcopy(self.opt.state_dict()),
                         "training time in sec": (time.perf_counter() - start_time),
                     }
                     early_stop_counter = 0
@@ -163,7 +188,7 @@ class Solver:
                         )
                         break
                 if self.best_model_params is not None and args["visualize_epochs"]:
-                    with torch.no_grad():
+                    with torch.no_grad(), TIMER.section("epoch_visualization"):
                         model_tmp = deepcopy(self.model)
                         visualize_outputs(
                             datasetType,
@@ -173,6 +198,7 @@ class Solver:
                             plot_path=args["destination"] / f"temp{epoch}",
                             amount_datapoints_to_visu=1,
                             pic_format="png",
+                            render=args.get("render_images", True),
                         )
         except KeyboardInterrupt:
             log.info("\nTraining interrupted by user.")
@@ -191,6 +217,7 @@ class Solver:
                         plot_path=args["destination"] / f"plot_val_interim_e{epoch}",
                         amount_datapoints_to_visu=2,
                         pic_format="png",
+                        render=args.get("render_images", True),
                     )
             except Exception as e:
                 logging.error(e)
@@ -235,10 +262,8 @@ class Solver:
             enumerate(dataloader),
             "Processing batches",
             total=len(dataloader),
-            dynamic_ncols=True,
             unit="batch",
-            leave=False,
-            mininterval=10,
+            **_tqdm_kwargs(dynamic_ncols=True, leave=False, mininterval=10),
         ):
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
@@ -268,51 +293,54 @@ class Solver:
 
         with torch.no_grad():
             for case, dataloader in dataloaders.items():
-                # Enforce batch size 1 so L∞ / PAT / SSIM are per-sample then averaged.
-                eval_loader = DataLoader(
-                    dataloader.dataset,
-                    batch_size=1,
-                    shuffle=False,
-                    num_workers=0,
-                )
-                norm = eval_loader.dataset.norm
-                metrics[case] = {m: [] for m in EVAL_METRIC_NAMES}
-                pat_loss = None
+                with TIMER.section(case):
+                    # Enforce batch size 1 so L∞ / PAT / SSIM are per-sample then averaged.
+                    eval_loader = DataLoader(
+                        dataloader.dataset,
+                        batch_size=1,
+                        shuffle=False,
+                        num_workers=0,
+                    )
+                    norm = eval_loader.dataset.norm
+                    TIMER.note("samples", len(eval_loader.dataset))
+                    metrics[case] = {m: [] for m in EVAL_METRIC_NAMES}
+                    pat_loss = None
 
-                for x, y in eval_loader:
-                    x, y = x.to(device), y.to(device)
-                    y_pred = self.model(x)
+                    for x, y in eval_loader:
+                        x, y = x.to(device), y.to(device)
+                        with TIMER.section("model_forward"):
+                            y_pred = self.model(x)
 
-                    num_channels = y_pred.shape[1]
+                        num_channels = y_pred.shape[1]
 
-                    if pat_loss is None:
-                        pat_loss = make_pat_loss(num_channels, device)
-                        loss_funcs["PAT"] = pat_loss
+                        if pat_loss is None:
+                            pat_loss = make_pat_loss(num_channels, device)
+                            loss_funcs["PAT"] = pat_loss
 
-                    req_h, req_w = y_pred.shape[2:]
-                    h, w = y.shape[2:]
-                    sh, sw = (h - req_h) // 2, (w - req_w) // 2
-                    y_reduced = y[:, :, sh : sh + req_h, sw : sw + req_w]
+                        req_h, req_w = y_pred.shape[2:]
+                        h, w = y.shape[2:]
+                        sh, sw = (h - req_h) // 2, (w - req_w) // 2
+                        y_reduced = y[:, :, sh : sh + req_h, sw : sw + req_w]
 
-                    metrics[case]["SSIM"].append(1.0 - loss_funcs["SSIM"](y_pred, y_reduced).item())
+                        metrics[case]["SSIM"].append(1.0 - loss_funcs["SSIM"](y_pred, y_reduced).item())
 
-                    for b in range(y_pred.shape[0]):
-                        norm.reverse(y_pred[b], data_type="Labels")
-                        norm.reverse(y_reduced[b], data_type="Labels")
+                        for b in range(y_pred.shape[0]):
+                            norm.reverse(y_pred[b], data_type="Labels")
+                            norm.reverse(y_reduced[b], data_type="Labels")
 
-                    for m_name in CHANNELWISE_EVAL_NAMES:
-                        c_vals = [
-                            loss_funcs[m_name](y_pred[:, c : c + 1], y_reduced[:, c : c + 1]).item()
-                            for c in range(num_channels)
-                        ]
-                        metrics[case][m_name].append(c_vals)
+                        for m_name in CHANNELWISE_EVAL_NAMES:
+                            c_vals = [
+                                loss_funcs[m_name](y_pred[:, c : c + 1], y_reduced[:, c : c + 1]).item()
+                                for c in range(num_channels)
+                            ]
+                            metrics[case][m_name].append(c_vals)
 
-                    metrics[case]["PAT"].append(loss_funcs["PAT"](y_pred, y_reduced).item())
+                        metrics[case]["PAT"].append(loss_funcs["PAT"](y_pred, y_reduced).item())
 
-                for m_name in loss_funcs.keys():
-                    if metrics[case][m_name]:
-                        val_tensor = torch.tensor(metrics[case][m_name], dtype=torch.float32)
-                        metrics[case][m_name] = val_tensor.mean(dim=0).tolist()
+                    for m_name in loss_funcs.keys():
+                        if metrics[case][m_name]:
+                            val_tensor = torch.tensor(metrics[case][m_name], dtype=torch.float32)
+                            metrics[case][m_name] = val_tensor.mean(dim=0).tolist()
 
         all_metrics["loss"] = metrics
         save_yaml(all_metrics, destination / "measurements.yaml")

@@ -1,12 +1,18 @@
 run_configuration:
-  run_name: steady-state-small-true_vel
-  dataset: steady-state-small
+  run_name: seasonal-pred_vel
+  dataset: seasonal
   seed: 2406
   device: cuda:0
-  use_velocity_model: false
+  use_velocity_model: true
 
   pipeline:
-    - step3: test
+    - clean: data_prep
+    - clean: results-step1
+    - step1: train
+    - clean: results-step2
+    - step2: run
+    - clean: results-step3
+    - step3: train
 
 general_configuration:
   step1:
@@ -15,15 +21,17 @@ general_configuration:
       validation: [17, 18, 19, 20, 21] # 19%
       test: [22, 23, 24, 25] # 15%
     general:
-      epochs: 100
       visualize: false
       visualize_epochs: false
-    scheduler:
-      type: ReduceLROnPlateau
-      init_lr: 1e-4
+    training:
+      epochs: 100
+      scheduler: ReduceLROnPlateau
+      init_lr: 1e-3
+      weight_decay: 0.05
       mode: min
       factor: 0.2
-      patience: 10
+      patience: 5
+      early_stop_patience_multiplier: 2
       threshold: 1e-3
       min_lr: 1e-6
     model_parameters:
@@ -38,7 +46,7 @@ general_configuration:
       dilation: 1
       norm: batchnorm
       repeat_inner: false
-      skip_per_dir: 16
+      skip_per_dir: 8
       len_box: 256
       train_loss: MSE
       bool_cutouts: true
@@ -47,15 +55,16 @@ general_configuration:
       activation: LeakyReLU
 
   step2:
-    rwpt:
+    general:
+      visualize: false
       samples: 40000
-      steps: 4000
+      max_steps_per_day: 0.4
     physical_parameters:
       duration_years: 27.5
-      thickness_aquifer_m: 5.4
-      longitudinal_dispersivity_m: 4.75
-      transverse_dispersivity_h_m: 0.475
-      include: ../physical_parameters-steady-state.yaml
+      thickness_aquifer_m: 5.0
+      longitudinal_dispersivity_m: 5.0
+      transverse_dispersivity_h_m: 0.5
+      include: ../physical_parameters-seasonal-10_6C.yaml
 
   step3:
     datapoints:
@@ -63,22 +72,24 @@ general_configuration:
       validation: [17, 18, 19, 20, 21] # 19%
       test: [22, 23, 24, 25] # 15%
     general:
-      epochs: 100
       visualize: false
       visualize_epochs: false
-    scheduler:
-      type: ReduceLROnPlateau
+    training:
+      epochs: 100
+      scheduler: ReduceLROnPlateau
       init_lr: 1e-3
+      weight_decay: 0.05
       mode: min
       factor: 0.2
-      patience: 10
+      patience: 5
+      early_stop_patience_multiplier: 2
       threshold: 1e-3
       min_lr: 1e-6
     model_parameters:
       network: unet
       inputs: [p, k, i, x, y, 7]
       outputs: [t]
-      batchsize: 1
+      batchsize: 20
       kernel_size: 3
       depth: 3
       init_features: 64
@@ -89,12 +100,12 @@ general_configuration:
       skip_per_dir: 8
       len_box: 256
       train_loss: Huber
-      bool_cutouts: false
+      bool_cutouts: true
       optimizer_switch: false
       optimizer: AdamW
       activation: LeakyReLU
 
 paths:
   datasets_raw: ../../datasets
-  datasets_prep: generate-reproducible-number/results/rwpt-low-res/steady-state-small-true_vel/data_prep
-  results: generate-reproducible-number/results/rwpt-low-res
+  datasets_prep: generate-reproducible-number/results/rwpt-default/seasonal-pred_vel/data_prep
+  results: generate-reproducible-number/results/rwpt-default

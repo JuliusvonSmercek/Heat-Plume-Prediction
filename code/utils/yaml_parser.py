@@ -18,6 +18,7 @@ def force_string(v: Any) -> str:
 
 CoercedString = Annotated[str, BeforeValidator(force_string)]
 T = TypeVar("T", bound=BaseModel)
+DAYS_PER_YEAR = 365.25
 
 # --- Configuration Models ---
 
@@ -31,35 +32,25 @@ class Datapoints(BaseModel):
 
 
 class GeneralSettings(BaseModel):
-    """General training settings."""
+    """Output settings of a training step."""
+
+    visualize: bool  # plot specs (npy + yaml) are always written; true also renders images
+    visualize_epochs: bool  # extra plots after improving epochs
+
+
+class TrainingConfig(BaseModel):
+    """Optimisation loop: epoch budget, learning rate, ReduceLROnPlateau (the only scheduler) and early stopping."""
 
     epochs: int
-    visualize: bool
-    visualize_epochs: bool
-
-
-class ReduceLROnPlateauConfig(BaseModel):
-    """Configuration for ReduceLROnPlateau scheduler."""
-
-    type: Literal["ReduceLROnPlateau"]
     init_lr: float
+    weight_decay: float  # optimizer L2 regularization
+    scheduler: Literal["ReduceLROnPlateau"] = "ReduceLROnPlateau"
     mode: str = "min"
     factor: float
-    patience: int
-    threshold: float
+    patience: int  # LR drop after `patience` epochs without improvement
+    early_stop_patience_multiplier: int  # early stop after patience * multiplier epochs without improvement
+    threshold: float  # min. relative improvement, for LR drop, best epoch and early stopping
     min_lr: float
-
-
-class StepLRConfig(BaseModel):
-    """Configuration for StepLR scheduler."""
-
-    type: Literal["StepLR"]
-    init_lr: float
-    step_size: int
-    gamma: float
-
-
-SchedulerConfig = Annotated[ReduceLROnPlateauConfig | StepLRConfig, Field(discriminator="type")]
 
 
 class UNetParameters(BaseModel):
@@ -126,16 +117,31 @@ class MLStepConfig(BaseModel):
 
     datapoints: Datapoints
     general: GeneralSettings
-    scheduler: SchedulerConfig
+    training: TrainingConfig
     model_parameters: ModelConfig
     hopt_parameters: HoptParameters | None = None
 
 
-class Rwpt(BaseModel):
-    """RWPT parameters."""
+class SimulationGeneral(BaseModel):
+    """Step2 ``general`` block: visualization + RWPT parameters."""
 
+    visualize: bool  # plot specs (npy + yaml) are always written; true also renders images (+ prior-vs-true PNG)
     samples: int
-    steps: int
+    max_steps_per_day: float  # Cost ceiling on RWPT time steps per simulated day (Courant selection may use fewer).
+    target_courant: float = 1.0 # Thermal Courant target for automatic step counts (Co = |v_T|_max * dt / dx).
+    particles_per_batch: int = 5_000_000 # Particle batch size at the final (full-resolution) level.
+    deposit_points_per_axis: int = 2 # Gauss-Hermite quadrature points per axis for deposit_energy_quadrature.
+    # acc & multi grid
+    min_coarse_samples: int = 1_000 # Floor on fraction-scaled sample count at non-final acceptance grid levels.
+    acceptance_relaxation: float = 0.7 # Under-relaxation of the acceptance update in (0, 1].
+    acceptance_blur_px: float = 1.0 # Gaussian blur (px, in that level's pixel units) applied to the acceptance field.
+    acceptance_grid_fractions: list[float] = Field(default_factory=lambda: [1.0]) # Multi-resolution acceptance: grid size per level as a fraction of the full grid.
+    acceptance_grid_max_iters: list[int] = Field(default_factory=lambda: [1]) # Max self-consistent iterations per level (last value repeats if shorter than fractions).
+    convergence_threshold_C: float = 0.05 # Stop acceptance iteration once max overshoot beyond the physical band is below this (°C).
+
+    def max_steps(self, duration_years: float) -> int:
+        """Step ceiling for a simulation of ``duration_years``."""
+        return max(2, round(self.max_steps_per_day * duration_years * DAYS_PER_YEAR))
 
 
 class TimeSeriesParam(BaseModel):
@@ -169,7 +175,7 @@ class PhysicalParameters(BaseModel):
 class SimulationStepConfig(BaseModel):
     """Configuration for physics simulation step."""
 
-    rwpt: Rwpt
+    general: SimulationGeneral
     physical_parameters: PhysicalParameters
 
 

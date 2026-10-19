@@ -2,6 +2,7 @@ from code.preprocessing.datasets.dataset import DataPoint, DatasetBasis
 from code.preprocessing.datasets.dataset_cuts_jit import SimulationDatasetCuts, SimulationDatasetCutsSequential
 from code.utils import logging as log  # noqa: F401
 
+import torch
 from torch.utils.data import DataLoader
 
 
@@ -39,12 +40,14 @@ def init_data(
     return datasets["train"].input_channels, datasets["train"].output_channels, datasets
 
 
-def construct_dataloader(batch_size: int, dataset: DatasetBasis, shuffle: bool) -> DataLoader:
+def construct_dataloader(batch_size: int, dataset: DatasetBasis, shuffle: bool, seed: int | None = None) -> DataLoader:
+    """``seed`` gives the shuffle order (and worker seeds) its own RNG, independent of the global torch RNG."""
     effective_batch = min(len(dataset), batch_size)
     return DataLoader(
         dataset,
         batch_size=effective_batch,
         shuffle=shuffle,
+        generator=torch.Generator().manual_seed(seed) if seed is not None else None,
         drop_last=len(dataset) > effective_batch,
         num_workers=4,  # new, before: 0
         pin_memory=True,  # new
